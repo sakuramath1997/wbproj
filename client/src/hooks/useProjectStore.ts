@@ -1,6 +1,6 @@
 import { create } from 'zustand';
-import type { BoardInfo, WbelxEvent, SnapshotMarkerEvent, DrawEvent, WbAsset, AssetType } from '../types';
-import { removeFromAssetIndex, addToAssetIndex } from '../types';
+import type { BoardInfo, WbelxEvent, SnapshotMarkerEvent, WbAsset, AssetType } from '../types';
+import { removeFromAssetIndex, addToAssetIndex, onOverlayAdded, onOverlayRemoved } from '../types';
 import type { Project } from '../utils';
 import { 
   createNewProject, 
@@ -11,7 +11,7 @@ import {
   getBoardUuid,
 } from '../utils';
 import { generateUuid } from '../utils/common';
-import { computeState, getActiveStrokes } from '../utils/statemachine';
+import { computeState, getActiveStrokes, getActiveOverlays } from '../utils/statemachine';
 import { getTimestamp, generateSnapshotId } from '../utils/common';
 import {
   saveProjectConfig,
@@ -75,7 +75,7 @@ interface ProjectState {
   
   // スナップショット操作
   saveBoardWithSnapshot: (boardId: string, events: WbelxEvent[], sessionId: string) => Promise<void>;
-  loadBoardSnapshot: (boardId: string) => Promise<DrawEvent[] | null>;
+  loadBoardSnapshot: (boardId: string) => Promise<WbelxEvent[] | null>;
   clearBoardSnapshot: (boardId: string) => Promise<void>;
   removeFinalSnapshotMarker: (boardId: string) => Promise<void>;
   
@@ -84,6 +84,10 @@ interface ProjectState {
   deleteAsset: (uuid: string) => Promise<void>;
   getAssets: () => ImportedAsset[];
   loadAssetDataUrl: (uuid: string) => Promise<string | null>;
+  
+  // アセット参照更新（オーバーレイ追加/削除時）
+  onAssetAddedToBoard: (boardUuid: string, assetUuid: string) => Promise<void>;
+  onAssetRemovedFromBoard: (boardUuid: string, assetUuid: string) => Promise<void>;
   
   // プロジェクト情報
   getBoards: () => BoardInfo[];
@@ -443,6 +447,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     // 現在の状態を計算
     const state = computeState(events);
     const activeStrokes = getActiveStrokes(state);
+    const activeOverlays = getActiveOverlays(state);
     
     // S イベントを作成
     const snapshotMarker: SnapshotMarkerEvent = {
@@ -476,9 +481,30 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     
     set({ project: newProject });
     
+    // スナップショットイベントを作成（ストローク + オーバーレイ）
+    const snapshotEvents: WbelxEvent[] = [
+      ...activeStrokes,
+      ...activeOverlays.map(overlay => ({
+        type: 'OA' as const,
+        timestamp: getTimestamp(),
+        sessionId,
+        overlayId: overlay.overlayId,
+        assetUuid: overlay.assetUuid,
+        x: overlay.x,
+        y: overlay.y,
+        width: overlay.width,
+        height: overlay.height,
+        rotation: overlay.rotation,
+        viewport: overlay.viewport,
+        page: overlay.page,
+        zIndex: overlay.zIndex,
+        opacity: overlay.opacity,
+      })),
+    ];
+    
     // IndexedDB に保存
     await saveBoardEvents(boardId, eventsWithSnapshot);
-    await saveBoardSnapshot(boardId, activeStrokes);
+    await saveBoardSnapshot(boardId, snapshotEvents);
     await saveProjectConfig(newProject.config);
     
   },
@@ -671,5 +697,35 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   loadAssetDataUrl: async (uuid: string) => {
     return loadAssetFileAsDataUrl(uuid);
+  },
+
+  // アセット参照更新（オーバーレイ追加時）
+  onAssetAddedToBoard: async (boardUuid: string, assetUuid: string) => {
+    const { project } = get();
+    if (!project) return;
+    
+    const asset = project.assetIndex.byUuid.get(assetUuid);
+    if (!asset) return;
+    
+    // referencedBy と allAncestors を更新
+    onOverlayAdded(boardUuid, asset, project.assetIndex);
+    
+    // IndexedDB に保存
+    await saveAssetIndex(project.assetIndex);
+  },
+
+  // アセット参照更新（オーバーレイ削除時）
+  onAssetRemovedFromBoard: async (boardUuid: string, assetUuid: string) => {
+    const { project } = get();
+    if (!project) return;
+    
+    const asset = project.assetIndex.byUuid.get(assetUuid);
+    if (!asset) return;
+    
+    // referencedBy と allAncestors を更新
+    onOverlayRemoved(boardUuid, asset, project.assetIndex);
+    
+    // IndexedDB に保存
+    await saveAssetIndex(project.assetIndex);
   },
 }));

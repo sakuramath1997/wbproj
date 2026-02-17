@@ -5,7 +5,7 @@
  */
 
 import { get, set, del, keys } from 'idb-keyval';
-import type { WbelxEvent, DrawEvent, WbAsset, AssetIndex } from '../types';
+import type { WbelxEvent, WbAsset, AssetIndex } from '../types';
 import { createAssetIndex, addToAssetIndex } from '../types';
 import type { 
   ProjectConfig, 
@@ -188,15 +188,15 @@ export async function deleteBoardEvents(boardId: string): Promise<void> {
 // スナップショット
 // ========================================
 
-/** スナップショットを保存 */
-export async function saveBoardSnapshot(boardId: string, strokes: DrawEvent[]): Promise<void> {
-  await set(KEYS.boardSnapshot(boardId), strokes);
+/** スナップショットを保存（ストローク + オーバーレイ） */
+export async function saveBoardSnapshot(boardId: string, events: WbelxEvent[]): Promise<void> {
+  await set(KEYS.boardSnapshot(boardId), events);
 }
 
 /** スナップショットを読み込み */
-export async function loadBoardSnapshot(boardId: string): Promise<DrawEvent[] | null> {
-  const strokes = await get<DrawEvent[]>(KEYS.boardSnapshot(boardId));
-  return strokes || null;
+export async function loadBoardSnapshot(boardId: string): Promise<WbelxEvent[] | null> {
+  const events = await get<WbelxEvent[]>(KEYS.boardSnapshot(boardId));
+  return events || null;
 }
 
 /** スナップショットを削除 */

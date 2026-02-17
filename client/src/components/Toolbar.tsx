@@ -23,7 +23,7 @@ interface ToolbarProps {
   onExportWbelx?: () => void;
   onExportSnapshot?: () => void;
   onAddAsset?: (uuid: string) => void;
-  availableAssets?: Array<{ uuid: string; fileName: string; type: 'image' | 'document' }>;
+  availableAssets?: Array<{ uuid: string; fileName: string; type: 'image' | 'document' | 'board' }>;
 }
 
 export function Toolbar({
@@ -107,7 +107,7 @@ export function Toolbar({
           className="toolbar-btn"
           onClick={() => setShowAssetMenu(!showAssetMenu)}
           disabled={!hasAssets}
-          title="Add image to board"
+          title="Add asset to board"
         >
           🖼️
         </button>
@@ -118,21 +118,63 @@ export function Toolbar({
               onClick={() => setShowAssetMenu(false)}
             />
             <div className="dropdown-menu asset-dropdown">
-              {availableAssets.filter(a => a.type === 'image').map((asset) => (
-                <button
-                  key={asset.uuid}
-                  className="dropdown-item"
-                  onClick={() => {
-                    onAddAsset?.(asset.uuid);
-                    setShowAssetMenu(false);
-                  }}
-                >
-                  🖼️ {asset.fileName}
-                </button>
-              ))}
-              {availableAssets.filter(a => a.type === 'image').length === 0 && (
+              {/* Images */}
+              {availableAssets.filter(a => a.type === 'image').length > 0 && (
+                <>
+                  <div className="dropdown-section-header">Images</div>
+                  {availableAssets.filter(a => a.type === 'image').map((asset) => (
+                    <button
+                      key={asset.uuid}
+                      className="dropdown-item"
+                      onClick={() => {
+                        onAddAsset?.(asset.uuid);
+                        setShowAssetMenu(false);
+                      }}
+                    >
+                      🖼️ {asset.fileName}
+                    </button>
+                  ))}
+                </>
+              )}
+              {/* Boards */}
+              {availableAssets.filter(a => a.type === 'board').length > 0 && (
+                <>
+                  <div className="dropdown-section-header">Boards</div>
+                  {availableAssets.filter(a => a.type === 'board').map((asset) => (
+                    <button
+                      key={asset.uuid}
+                      className="dropdown-item"
+                      onClick={() => {
+                        onAddAsset?.(asset.uuid);
+                        setShowAssetMenu(false);
+                      }}
+                    >
+                      📋 {asset.fileName}
+                    </button>
+                  ))}
+                </>
+              )}
+              {/* Documents (PDF) */}
+              {availableAssets.filter(a => a.type === 'document').length > 0 && (
+                <>
+                  <div className="dropdown-section-header">Documents</div>
+                  {availableAssets.filter(a => a.type === 'document').map((asset) => (
+                    <button
+                      key={asset.uuid}
+                      className="dropdown-item"
+                      onClick={() => {
+                        onAddAsset?.(asset.uuid);
+                        setShowAssetMenu(false);
+                      }}
+                    >
+                      📄 {asset.fileName}
+                    </button>
+                  ))}
+                </>
+              )}
+              {availableAssets.length === 0 && (
                 <div className="dropdown-item" style={{ color: '#888' }}>
-                  No images imported
+                  No assets available
                 </div>
               )}
             </div>

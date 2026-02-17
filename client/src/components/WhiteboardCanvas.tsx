@@ -9,6 +9,7 @@ import type {
   CursorInfo,
   OverlayState,
   OverlayRemoveEvent,
+  OverlayTransformEvent,
 } from '../types';
 import { 
   calculateBBox, 
@@ -19,6 +20,9 @@ import {
   fitCurveToSvgPath,
   PRESETS,
 } from '../utils';
+
+// ドラッグ状態の型
+type DragMode = 'none' | 'move' | 'resize-nw' | 'resize-ne' | 'resize-se' | 'resize-sw';
 
 interface WhiteboardCanvasProps {
   activeStrokes: DrawEvent[];
@@ -33,6 +37,7 @@ interface WhiteboardCanvasProps {
   onAddDrawEvent: (event: DrawEvent) => void;
   onAddEraseEvent: (event: EraseEvent, targetStrokes: DrawEvent[]) => void;
   onRemoveOverlayEvent: (event: OverlayRemoveEvent) => void;
+  onTransformOverlay: (event: OverlayTransformEvent, before: { x: number; y: number; width: number; height: number; rotation: number }) => void;
   onSelectOverlay: (overlayId: string | null) => void;
   onUpdateCursor: (x: number, y: number) => void;
   onHideCursor: () => void;
@@ -51,6 +56,7 @@ export function WhiteboardCanvas({
   onAddDrawEvent,
   onAddEraseEvent,
   onRemoveOverlayEvent,
+  onTransformOverlay,
   onSelectOverlay,
   onUpdateCursor,
   onHideCursor,
@@ -68,6 +74,12 @@ export function WhiteboardCanvas({
   // パン操作中
   const isPanningRef = useRef(false);
   const lastPanPointRef = useRef<Point | null>(null);
+
+  // オーバーレイドラッグ
+  const dragModeRef = useRef<DragMode>('none');
+  const dragStartRef = useRef<Point | null>(null);
+  const dragOverlayInitialRef = useRef<{ x: number; y: number; width: number; height: number; rotation: number } | null>(null);
+  const [dragPreview, setDragPreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
 
   // キャンバスサイズ調整
 
@@ -119,51 +131,76 @@ export function WhiteboardCanvas({
 
     // オーバーレイ描画（ストロークより後ろ）
     for (const overlay of activeOverlays) {
+      ctx.save();
+      ctx.globalAlpha = overlay.opacity;
+      
+      // ドラッグ中は dragPreview の位置を使用
+      const isBeingDragged = selectedOverlayId === overlay.overlayId && dragPreview;
+      const displayX = isBeingDragged ? dragPreview.x : overlay.x;
+      const displayY = isBeingDragged ? dragPreview.y : overlay.y;
+      const displayWidth = isBeingDragged ? dragPreview.width : overlay.width;
+      const displayHeight = isBeingDragged ? dragPreview.height : overlay.height;
+      
+      // 回転を適用
+      if (overlay.rotation !== 0) {
+        const centerX = displayX + displayWidth / 2;
+        const centerY = displayY + displayHeight / 2;
+        ctx.translate(centerX, centerY);
+        ctx.rotate((overlay.rotation * Math.PI) / 180);
+        ctx.translate(-centerX, -centerY);
+      }
+      
       const img = overlayImages.get(overlay.assetUuid);
       if (img && img.complete) {
-        ctx.save();
-        ctx.globalAlpha = overlay.opacity;
+        // 画像を描画
+        ctx.drawImage(img, displayX, displayY, displayWidth, displayHeight);
+      } else {
+        // プレースホルダを描画（ボードや読み込み中の画像/PDF用）
+        ctx.fillStyle = '#e5e7eb';
+        ctx.fillRect(displayX, displayY, displayWidth, displayHeight);
+        ctx.strokeStyle = '#9ca3af';
+        ctx.lineWidth = 1 / transform.scale;
+        ctx.strokeRect(displayX, displayY, displayWidth, displayHeight);
         
-        // 回転を適用
-        if (overlay.rotation !== 0) {
-          const centerX = overlay.x + overlay.width / 2;
-          const centerY = overlay.y + overlay.height / 2;
-          ctx.translate(centerX, centerY);
-          ctx.rotate((overlay.rotation * Math.PI) / 180);
-          ctx.translate(-centerX, -centerY);
-        }
-        
-        ctx.drawImage(img, overlay.x, overlay.y, overlay.width, overlay.height);
-        
-        // 選択枠を描画
-        if (selectedOverlayId === overlay.overlayId) {
-          ctx.strokeStyle = '#3b82f6';
-          ctx.lineWidth = 2 / transform.scale;
-          ctx.setLineDash([5 / transform.scale, 5 / transform.scale]);
-          ctx.strokeRect(overlay.x, overlay.y, overlay.width, overlay.height);
-          ctx.setLineDash([]);
-          
-          // 選択ハンドル
-          const handleSize = 8 / transform.scale;
-          ctx.fillStyle = '#3b82f6';
-          const corners = [
-            { x: overlay.x, y: overlay.y },
-            { x: overlay.x + overlay.width, y: overlay.y },
-            { x: overlay.x + overlay.width, y: overlay.y + overlay.height },
-            { x: overlay.x, y: overlay.y + overlay.height },
-          ];
-          for (const corner of corners) {
-            ctx.fillRect(
-              corner.x - handleSize / 2,
-              corner.y - handleSize / 2,
-              handleSize,
-              handleSize
-            );
-          }
-        }
-        
-        ctx.restore();
+        // アイコンとラベル
+        ctx.fillStyle = '#6b7280';
+        ctx.font = `${14 / transform.scale}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const centerX = displayX + displayWidth / 2;
+        const centerY = displayY + displayHeight / 2;
+        ctx.fillText('📋', centerX, centerY - 10 / transform.scale);
+        ctx.fillText('Loading...', centerX, centerY + 10 / transform.scale);
       }
+      
+      // 選択枠を描画
+      if (selectedOverlayId === overlay.overlayId) {
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 2 / transform.scale;
+        ctx.setLineDash([5 / transform.scale, 5 / transform.scale]);
+        ctx.strokeRect(displayX, displayY, displayWidth, displayHeight);
+        ctx.setLineDash([]);
+        
+        // 選択ハンドル
+        const handleSize = 8 / transform.scale;
+        ctx.fillStyle = '#3b82f6';
+        const corners = [
+          { x: displayX, y: displayY },
+          { x: displayX + displayWidth, y: displayY },
+          { x: displayX + displayWidth, y: displayY + displayHeight },
+          { x: displayX, y: displayY + displayHeight },
+        ];
+        for (const corner of corners) {
+          ctx.fillRect(
+            corner.x - handleSize / 2,
+            corner.y - handleSize / 2,
+            handleSize,
+            handleSize
+          );
+        }
+      }
+      
+      ctx.restore();
     }
 
     // 確定済みストローク描画
@@ -216,7 +253,7 @@ export function WhiteboardCanvas({
     }
     
     ctx.restore();
-  }, [activeStrokes, activeOverlays, overlayImages, selectedOverlayId, currentStroke, transform, cursors]);
+  }, [activeStrokes, activeOverlays, overlayImages, selectedOverlayId, dragPreview, currentStroke, transform, cursors]);
 
   // 描画ループ
   useEffect(() => {
@@ -313,6 +350,58 @@ export function WhiteboardCanvas({
     }
 
     if (tool === 'select') {
+      // 選択中のオーバーレイがあればハンドルチェック
+      if (selectedOverlayId) {
+        const selectedOverlay = activeOverlays.find(o => o.overlayId === selectedOverlayId);
+        if (selectedOverlay) {
+          const handleSize = 12 / transform.scale;
+          const corners = [
+            { mode: 'resize-nw' as DragMode, x: selectedOverlay.x, y: selectedOverlay.y },
+            { mode: 'resize-ne' as DragMode, x: selectedOverlay.x + selectedOverlay.width, y: selectedOverlay.y },
+            { mode: 'resize-se' as DragMode, x: selectedOverlay.x + selectedOverlay.width, y: selectedOverlay.y + selectedOverlay.height },
+            { mode: 'resize-sw' as DragMode, x: selectedOverlay.x, y: selectedOverlay.y + selectedOverlay.height },
+          ];
+          
+          for (const corner of corners) {
+            if (
+              Math.abs(point.x - corner.x) < handleSize &&
+              Math.abs(point.y - corner.y) < handleSize
+            ) {
+              // リサイズ開始
+              dragModeRef.current = corner.mode;
+              dragStartRef.current = point;
+              dragOverlayInitialRef.current = {
+                x: selectedOverlay.x,
+                y: selectedOverlay.y,
+                width: selectedOverlay.width,
+                height: selectedOverlay.height,
+                rotation: selectedOverlay.rotation,
+              };
+              return;
+            }
+          }
+          
+          // オーバーレイ内をクリック → 移動開始
+          if (
+            point.x >= selectedOverlay.x &&
+            point.x <= selectedOverlay.x + selectedOverlay.width &&
+            point.y >= selectedOverlay.y &&
+            point.y <= selectedOverlay.y + selectedOverlay.height
+          ) {
+            dragModeRef.current = 'move';
+            dragStartRef.current = point;
+            dragOverlayInitialRef.current = {
+              x: selectedOverlay.x,
+              y: selectedOverlay.y,
+              width: selectedOverlay.width,
+              height: selectedOverlay.height,
+              rotation: selectedOverlay.rotation,
+            };
+            return;
+          }
+        }
+      }
+      
       // オーバーレイをクリックしたかチェック（z-indexが高い順）
       let foundOverlay: OverlayState | null = null;
       for (let i = activeOverlays.length - 1; i >= 0; i--) {
@@ -345,7 +434,7 @@ export function WhiteboardCanvas({
     if (tool === 'eraser') {
       eraseAtPoint(point);
     }
-  }, [tool, color, strokeWidth, screenToCanvas, eraseAtPoint, activeOverlays, onSelectOverlay]);
+  }, [tool, color, strokeWidth, screenToCanvas, eraseAtPoint, activeOverlays, selectedOverlayId, transform.scale, onSelectOverlay]);
 
   // ポインタ移動
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
@@ -400,6 +489,69 @@ export function WhiteboardCanvas({
       return;
     }
 
+    // オーバーレイのドラッグ処理
+    if (tool === 'select' && dragModeRef.current !== 'none' && dragStartRef.current && dragOverlayInitialRef.current && selectedOverlayId) {
+      const dx = point.x - dragStartRef.current.x;
+      const dy = point.y - dragStartRef.current.y;
+      const initial = dragOverlayInitialRef.current;
+      
+      if (dragModeRef.current === 'move') {
+        // 移動
+        setDragPreview({
+          x: initial.x + dx,
+          y: initial.y + dy,
+          width: initial.width,
+          height: initial.height,
+        });
+      } else {
+        // リサイズ
+        let newX = initial.x;
+        let newY = initial.y;
+        let newWidth = initial.width;
+        let newHeight = initial.height;
+        
+        switch (dragModeRef.current) {
+          case 'resize-nw':
+            newX = initial.x + dx;
+            newY = initial.y + dy;
+            newWidth = initial.width - dx;
+            newHeight = initial.height - dy;
+            break;
+          case 'resize-ne':
+            newY = initial.y + dy;
+            newWidth = initial.width + dx;
+            newHeight = initial.height - dy;
+            break;
+          case 'resize-se':
+            newWidth = initial.width + dx;
+            newHeight = initial.height + dy;
+            break;
+          case 'resize-sw':
+            newX = initial.x + dx;
+            newWidth = initial.width - dx;
+            newHeight = initial.height + dy;
+            break;
+        }
+        
+        // 最小サイズを保証
+        if (newWidth < 20) {
+          if (dragModeRef.current === 'resize-nw' || dragModeRef.current === 'resize-sw') {
+            newX = initial.x + initial.width - 20;
+          }
+          newWidth = 20;
+        }
+        if (newHeight < 20) {
+          if (dragModeRef.current === 'resize-nw' || dragModeRef.current === 'resize-ne') {
+            newY = initial.y + initial.height - 20;
+          }
+          newHeight = 20;
+        }
+        
+        setDragPreview({ x: newX, y: newY, width: newWidth, height: newHeight });
+      }
+      return;
+    }
+
     if (tool === 'pen' && activeStrokeRef.current) {
       activeStrokeRef.current.points.push({
         ...point,
@@ -435,6 +587,39 @@ export function WhiteboardCanvas({
       return;
     }
 
+    // オーバーレイドラッグ完了
+    if (tool === 'select' && dragModeRef.current !== 'none' && dragOverlayInitialRef.current && selectedOverlayId && dragPreview) {
+      const before = dragOverlayInitialRef.current;
+      const selectedOverlay = activeOverlays.find(o => o.overlayId === selectedOverlayId);
+      
+      // 実際に移動/リサイズされた場合のみイベント発行
+      if (
+        dragPreview.x !== before.x ||
+        dragPreview.y !== before.y ||
+        dragPreview.width !== before.width ||
+        dragPreview.height !== before.height
+      ) {
+        const event: OverlayTransformEvent = {
+          type: 'OT',
+          timestamp: getTimestamp(),
+          sessionId,
+          overlayId: selectedOverlayId,
+          x: dragPreview.x,
+          y: dragPreview.y,
+          width: dragPreview.width,
+          height: dragPreview.height,
+          rotation: selectedOverlay?.rotation ?? 0,
+        };
+        onTransformOverlay(event, before);
+      }
+      
+      dragModeRef.current = 'none';
+      dragStartRef.current = null;
+      dragOverlayInitialRef.current = null;
+      setDragPreview(null);
+      return;
+    }
+
     if (tool === 'pen' && activeStrokeRef.current) {
       const stroke = activeStrokeRef.current;
       if (stroke.points.length >= 2) {
@@ -458,7 +643,7 @@ export function WhiteboardCanvas({
       activeStrokeRef.current = null;
       setCurrentStroke(null);
     }
-  }, [tool, sessionId, onAddDrawEvent]);
+  }, [tool, sessionId, selectedOverlayId, activeOverlays, dragPreview, onAddDrawEvent, onTransformOverlay]);
 
   // ポインタ離脱
   const handlePointerLeave = useCallback((e: React.PointerEvent) => {

@@ -12,8 +12,7 @@ import type {
   OverlayAddEvent,
   OverlayRemoveEvent,
 } from '../types';
-import { STROKE_WIDTHS, COLOR_PALETTE } from '../types';
-import { computeState, getActiveStrokes } from '../utils/statemachine';
+import { STROKE_WIDTHS, COLOR_PALETTE, canAddAsOverlay } from '../types';
 import { getTimestamp, generateSnapshotId } from '../utils/common';
 import {
   saveBoardEvents,
@@ -23,6 +22,7 @@ import {
   deleteBoardSnapshot,
   loadAssetFileAsDataUrl,
 } from '../utils/storage';
+import { loadPdfDocument, renderPdfPage } from '../utils/pdf';
 
 // 通知の型
 interface Notification {
@@ -37,7 +37,7 @@ export function BoardEditor() {
   const { boardId } = useParams<{ boardId: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { project, getBoardUuid, getAssets } = useProjectStore();
+  const { project, getBoardUuid, getAssets, getBoards, onAssetAddedToBoard, onAssetRemovedFromBoard } = useProjectStore();
 
   // ツール状態
   const [tool, setTool] = useState<ToolType>('pen');
@@ -139,6 +139,7 @@ export function BoardEditor() {
     addEraseEvent,
     addOverlayEvent,
     removeOverlayEvent,
+    transformOverlayEvent,
     performUndo,
     performRedo,
     canUndo,
@@ -154,6 +155,12 @@ export function BoardEditor() {
     isHostConnected,
     guestsPresent,
     events,
+    // アセット転送
+    incomingAssetRequests,
+    receivedAssets,
+    requestAsset,
+    sendAssetResponse,
+    clearAssetRequest,
   } = useYjs({
     roomId,
     enabled: !!roomId && !isLoading,
@@ -169,6 +176,7 @@ export function BoardEditor() {
   useEffect(() => {
     const loadImages = async () => {
       const newImages = new Map<string, HTMLImageElement>();
+      const missingUuids: string[] = [];
       
       for (const overlay of activeOverlays) {
         // 既にロード済みならスキップ
@@ -177,21 +185,73 @@ export function BoardEditor() {
           continue;
         }
         
-        // 画像を読み込む
+        // アセットタイプを取得
+        const asset = project?.assetIndex.byUuid.get(overlay.assetUuid);
+        const assetType = asset?.type || 'image';
+        
+        // 画像・PDF を読み込む（IndexedDB から）
         try {
           const dataUrl = await loadAssetFileAsDataUrl(overlay.assetUuid);
           if (dataUrl) {
-            const img = new Image();
-            img.src = dataUrl;
-            await new Promise<void>((resolve, reject) => {
-              img.onload = () => resolve();
-              img.onerror = reject;
-            });
-            newImages.set(overlay.assetUuid, img);
+            if (assetType === 'document') {
+              // PDF の場合は指定ページを描画
+              const pdfDoc = await loadPdfDocument(dataUrl);
+              const pageNum = overlay.page > 0 ? overlay.page : 1;
+              const img = await renderPdfPage(pdfDoc, pageNum);
+              newImages.set(overlay.assetUuid, img);
+            } else if (assetType === 'image') {
+              // 画像の場合
+              const img = new Image();
+              img.src = dataUrl;
+              await new Promise<void>((resolve, reject) => {
+                img.onload = () => resolve();
+                img.onerror = reject;
+              });
+              newImages.set(overlay.assetUuid, img);
+            }
+            // board タイプは後で実装（サムネイル描画）
+            continue;
           }
         } catch (error) {
-          console.warn('Failed to load overlay image:', overlay.assetUuid, error);
+          console.warn('Failed to load asset:', overlay.assetUuid, error);
         }
+        
+        // receivedAssets から取得を試みる
+        const received = receivedAssets.get(overlay.assetUuid);
+        if (received) {
+          try {
+            const fullDataUrl = `data:${received.mimeType};base64,${received.data}`;
+            
+            if (received.mimeType === 'application/pdf') {
+              // PDF の場合
+              const pdfDoc = await loadPdfDocument(fullDataUrl);
+              const pageNum = overlay.page > 0 ? overlay.page : 1;
+              const img = await renderPdfPage(pdfDoc, pageNum);
+              newImages.set(overlay.assetUuid, img);
+            } else {
+              // 画像の場合
+              const img = new Image();
+              img.src = fullDataUrl;
+              await new Promise<void>((resolve, reject) => {
+                img.onload = () => resolve();
+                img.onerror = reject;
+              });
+              newImages.set(overlay.assetUuid, img);
+            }
+            clearAssetRequest(overlay.assetUuid);
+            continue;
+          } catch (error) {
+            console.warn('Failed to load received asset:', overlay.assetUuid, error);
+          }
+        }
+        
+        // まだない場合はリクエスト
+        missingUuids.push(overlay.assetUuid);
+      }
+      
+      // 不足しているアセットをリクエスト
+      for (const uuid of missingUuids) {
+        requestAsset(uuid);
       }
       
       if (newImages.size > 0 || overlayImages.size !== newImages.size) {
@@ -200,7 +260,32 @@ export function BoardEditor() {
     };
     
     loadImages();
-  }, [activeOverlays]);
+  }, [activeOverlays, receivedAssets, requestAsset, clearAssetRequest, project]);
+
+  // ========================================
+  // アセットリクエストへの応答（ホスト側）
+  // ========================================
+  useEffect(() => {
+    if (incomingAssetRequests.length === 0) return;
+    
+    const respondToRequests = async () => {
+      for (const uuid of incomingAssetRequests) {
+        // 自分が持っているか確認
+        const dataUrl = await loadAssetFileAsDataUrl(uuid);
+        if (dataUrl) {
+          // data:image/png;base64,xxxx の形式からBase64部分を抽出
+          const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+          if (match) {
+            const mimeType = match[1];
+            const base64Data = match[2];
+            sendAssetResponse(uuid, base64Data, mimeType);
+          }
+        }
+      }
+    };
+    
+    respondToRequests();
+  }, [incomingAssetRequests, sendAssetResponse]);
 
   // アセット追加ハンドラ
   const handleAddAsset = useCallback((assetUuid: string) => {
@@ -221,12 +306,19 @@ export function BoardEditor() {
       opacity: 1.0,
     };
     addOverlayEvent(event);
-  }, [sessionId, activeOverlays.length, addOverlayEvent]);
+    
+    // アセット参照を更新（ボードネスト用）
+    if (localBoardUuid) {
+      onAssetAddedToBoard(localBoardUuid, assetUuid);
+    }
+  }, [sessionId, activeOverlays.length, addOverlayEvent, localBoardUuid, onAssetAddedToBoard]);
 
   // オーバーレイ削除ハンドラ
   const handleRemoveOverlay = useCallback((event: OverlayRemoveEvent) => {
     // 削除対象のオーバーレイデータを取得
     const targetOverlays: OverlayAddEvent[] = [];
+    const removedAssetUuids: string[] = [];
+    
     for (const overlayId of event.targetOverlayIds) {
       const overlay = activeOverlays.find(o => o.overlayId === overlayId);
       if (overlay) {
@@ -246,19 +338,63 @@ export function BoardEditor() {
           zIndex: overlay.zIndex,
           opacity: overlay.opacity,
         });
+        removedAssetUuids.push(overlay.assetUuid);
       }
     }
     removeOverlayEvent(event, targetOverlays);
-  }, [activeOverlays, removeOverlayEvent]);
+    
+    // アセット参照を更新（ボードネスト用）
+    if (localBoardUuid) {
+      for (const assetUuid of removedAssetUuids) {
+        // 同じアセットの他のオーバーレイが残っていないか確認
+        const otherOverlays = activeOverlays.filter(
+          o => o.assetUuid === assetUuid && !event.targetOverlayIds.includes(o.overlayId)
+        );
+        if (otherOverlays.length === 0) {
+          onAssetRemovedFromBoard(localBoardUuid, assetUuid);
+        }
+      }
+    }
+  }, [activeOverlays, removeOverlayEvent, localBoardUuid, onAssetRemovedFromBoard]);
 
-  // 利用可能なアセット
+  // 利用可能なアセット（画像・PDF + 他のボード）
   const availableAssets = useMemo(() => {
-    return getAssets().map(a => ({
-      uuid: a.uuid,
-      fileName: a.fileName,
-      type: a.type,
-    }));
-  }, [getAssets]);
+    const assets: Array<{ uuid: string; fileName: string; type: 'image' | 'document' | 'board' }> = [];
+    
+    // 画像とPDF
+    for (const a of getAssets()) {
+      assets.push({
+        uuid: a.uuid,
+        fileName: a.fileName,
+        type: a.type,
+      });
+    }
+    
+    // 他のボード（循環参照チェック付き）
+    if (project && localBoardUuid) {
+      const boards = getBoards();
+      for (const board of boards) {
+        // 自分自身はスキップ
+        if (board.id === boardId) continue;
+        
+        // このボードの UUID を取得
+        const boardAssetUuid = getBoardUuid(board.id);
+        if (!boardAssetUuid) continue;
+        
+        // 循環参照チェック
+        const boardAsset = project.assetIndex.byUuid.get(boardAssetUuid);
+        if (boardAsset && canAddAsOverlay(localBoardUuid, boardAsset, project.assetIndex)) {
+          assets.push({
+            uuid: boardAssetUuid,
+            fileName: board.name,
+            type: 'board',
+          });
+        }
+      }
+    }
+    
+    return assets;
+  }, [getAssets, getBoards, getBoardUuid, project, boardId, localBoardUuid]);
 
   // ========================================
   // 2. イベント変更時：IndexedDB に即時保存
@@ -294,15 +430,32 @@ export function BoardEditor() {
       // イベントログを保存
       await saveBoardEvents(boardId, eventsWithS);
       
-      // スナップショットを保存
-      const state = computeState(events);
-      const strokes = getActiveStrokes(state);
-      await saveBoardSnapshot(boardId, strokes);
+      // スナップショットを保存（ストローク + オーバーレイ）
+      const snapshotEvents: WbelxEvent[] = [
+        ...activeStrokes,
+        ...activeOverlays.map(overlay => ({
+          type: 'OA' as const,
+          timestamp: getTimestamp(),
+          sessionId,
+          overlayId: overlay.overlayId,
+          assetUuid: overlay.assetUuid,
+          x: overlay.x,
+          y: overlay.y,
+          width: overlay.width,
+          height: overlay.height,
+          rotation: overlay.rotation,
+          viewport: overlay.viewport,
+          page: overlay.page,
+          zIndex: overlay.zIndex,
+          opacity: overlay.opacity,
+        })),
+      ];
+      await saveBoardSnapshot(boardId, snapshotEvents);
       
     }
     
     navigate(isJoiningViaShareLink ? '/' : '/project');
-  }, [isHost, boardId, events, sessionId, navigate, isJoiningViaShareLink]);
+  }, [isHost, boardId, events, sessionId, activeStrokes, activeOverlays, navigate, isJoiningViaShareLink]);
 
   // ゲストがいる場合はスナップショットをクリア
   useEffect(() => {
@@ -525,6 +678,7 @@ export function BoardEditor() {
           onAddDrawEvent={addDrawEvent}
           onAddEraseEvent={addEraseEvent}
           onRemoveOverlayEvent={handleRemoveOverlay}
+          onTransformOverlay={transformOverlayEvent}
           onSelectOverlay={setSelectedOverlayId}
           onUpdateCursor={updateCursor}
           onHideCursor={hideCursor}
