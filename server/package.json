@@ -1,0 +1,11 @@
+{
+  "name": "whiteboard-signaling-server",
+  "version": "1.0.0",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.17.0"
+  }
+}
