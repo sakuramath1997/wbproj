@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import type { ToolType, StrokeWidthKey } from '../types';
 import { COLOR_PALETTE, STROKE_WIDTHS } from '../types';
 
@@ -12,7 +12,6 @@ interface ToolbarProps {
   isConnected?: boolean;
   peerCount?: number;
   hasContent?: boolean;
-  hasAssets?: boolean;
   onBack: () => void;
   onToolChange: (tool: ToolType) => void;
   onColorChange: (color: string) => void;
@@ -23,6 +22,7 @@ interface ToolbarProps {
   onExportWbelx?: () => void;
   onExportSnapshot?: () => void;
   onAddAsset?: (uuid: string) => void;
+  onImportFile?: (file: File) => Promise<string | null>;
   availableAssets?: Array<{ uuid: string; fileName: string; type: 'image' | 'document' | 'board' }>;
 }
 
@@ -36,7 +36,6 @@ export function Toolbar({
   isConnected = false,
   peerCount = 0,
   hasContent = false,
-  hasAssets = false,
   onBack,
   onToolChange,
   onColorChange,
@@ -47,17 +46,41 @@ export function Toolbar({
   onExportWbelx,
   onExportSnapshot,
   onAddAsset,
+  onImportFile,
   availableAssets = [],
 }: ToolbarProps) {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showAssetMenu, setShowAssetMenu] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleCopyLink = useCallback(() => {
     onCopyShareLink?.();
     setLinkCopied(true);
     setTimeout(() => setLinkCopied(false), 2000);
   }, [onCopyShareLink]);
+
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !onImportFile) return;
+    
+    setIsImporting(true);
+    try {
+      const uuid = await onImportFile(file);
+      if (uuid) {
+        // インポート成功したら即座にオーバーレイとして追加
+        onAddAsset?.(uuid);
+      }
+    } finally {
+      setIsImporting(false);
+      setShowAssetMenu(false);
+      // ファイル入力をリセット
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  }, [onImportFile, onAddAsset]);
 
   return (
     <div className="editor-toolbar">
@@ -106,18 +129,43 @@ export function Toolbar({
         <button
           className="toolbar-btn"
           onClick={() => setShowAssetMenu(!showAssetMenu)}
-          disabled={!hasAssets}
+          disabled={isImporting}
           title="Add asset to board"
         >
-          🖼️
+          {isImporting ? '⏳' : '🖼️'}
         </button>
-        {showAssetMenu && availableAssets.length > 0 && (
+        {showAssetMenu && (
           <>
             <div 
               className="dropdown-backdrop"
               onClick={() => setShowAssetMenu(false)}
             />
             <div className="dropdown-menu asset-dropdown">
+              {/* Import Section */}
+              <div className="dropdown-section-header">Import New</div>
+              <button
+                className="dropdown-item"
+                onClick={() => {
+                  if (fileInputRef.current) {
+                    fileInputRef.current.accept = 'image/*';
+                    fileInputRef.current.click();
+                  }
+                }}
+              >
+                📷 Import Image...
+              </button>
+              <button
+                className="dropdown-item"
+                onClick={() => {
+                  if (fileInputRef.current) {
+                    fileInputRef.current.accept = 'application/pdf';
+                    fileInputRef.current.click();
+                  }
+                }}
+              >
+                📄 Import PDF...
+              </button>
+              
               {/* Images */}
               {availableAssets.filter(a => a.type === 'image').length > 0 && (
                 <>
@@ -172,14 +220,16 @@ export function Toolbar({
                   ))}
                 </>
               )}
-              {availableAssets.length === 0 && (
-                <div className="dropdown-item" style={{ color: '#888' }}>
-                  No assets available
-                </div>
-              )}
             </div>
           </>
         )}
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          style={{ display: 'none' }}
+          onChange={handleFileSelect}
+        />
       </div>
 
       <div className="toolbar-divider" />

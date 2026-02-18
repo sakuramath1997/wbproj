@@ -10,6 +10,7 @@ import type {
   OverlayState,
   OverlayRemoveEvent,
   OverlayTransformEvent,
+  AssetType,
 } from '../types';
 import { 
   calculateBBox, 
@@ -34,13 +35,16 @@ interface WhiteboardCanvasProps {
   sessionId: string;
   selectedOverlayId: string | null;
   overlayImages: Map<string, HTMLImageElement>;
+  overlayAssetTypes: Map<string, AssetType>;
   onAddDrawEvent: (event: DrawEvent) => void;
   onAddEraseEvent: (event: EraseEvent, targetStrokes: DrawEvent[]) => void;
   onRemoveOverlayEvent: (event: OverlayRemoveEvent) => void;
   onTransformOverlay: (event: OverlayTransformEvent, before: { x: number; y: number; width: number; height: number; rotation: number }) => void;
   onSelectOverlay: (overlayId: string | null) => void;
+  onDoubleClickOverlay?: (overlayId: string) => void;
   onUpdateCursor: (x: number, y: number) => void;
   onHideCursor: () => void;
+  onTransformChange?: (transform: CanvasTransform) => void;
 }
 
 export function WhiteboardCanvas({
@@ -53,13 +57,16 @@ export function WhiteboardCanvas({
   sessionId,
   selectedOverlayId,
   overlayImages,
+  overlayAssetTypes,
   onAddDrawEvent,
   onAddEraseEvent,
   onRemoveOverlayEvent,
   onTransformOverlay,
   onSelectOverlay,
+  onDoubleClickOverlay,
   onUpdateCursor,
   onHideCursor,
+  onTransformChange,
 }: WhiteboardCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -80,8 +87,37 @@ export function WhiteboardCanvas({
   const dragStartRef = useRef<Point | null>(null);
   const dragOverlayInitialRef = useRef<{ x: number; y: number; width: number; height: number; rotation: number } | null>(null);
   const [dragPreview, setDragPreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [shiftPressed, setShiftPressed] = useState(false);
+
+  // Shift キー監視
+  // transform 変化を親に通知（ボードサムネイル解像度更新用）
+  useEffect(() => {
+    onTransformChange?.(transform);
+  }, [transform, onTransformChange]);
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') setShiftPressed(true);
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') setShiftPressed(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
 
   // キャンバスサイズ調整
+
+  // 選択されたオーバーレイが変更されたら、ドラッグ状態をリセット
+  useEffect(() => {
+    dragModeRef.current = 'none';
+    dragStartRef.current = null;
+    dragOverlayInitialRef.current = null;
+    setDragPreview(null);
+  }, [selectedOverlayId]);
 
   // マルチタッチ用
   const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
@@ -150,10 +186,20 @@ export function WhiteboardCanvas({
         ctx.translate(-centerX, -centerY);
       }
       
-      const img = overlayImages.get(overlay.assetUuid);
+      const img = overlayImages.get(overlay.overlayId);
       if (img && img.complete) {
-        // 画像を描画
-        ctx.drawImage(img, displayX, displayY, displayWidth, displayHeight);
+        const assetType = overlayAssetTypes.get(overlay.overlayId) ?? 'image';
+        // board タイプは viewport がサムネイルに焼き込まれているのでそのまま描画
+        // image/document タイプは viewport を source rect として指定（高解像度維持）
+        if (assetType !== 'board' && overlay.viewport.width > 0 && overlay.viewport.height > 0) {
+          ctx.drawImage(
+            img,
+            overlay.viewport.x, overlay.viewport.y, overlay.viewport.width, overlay.viewport.height,
+            displayX, displayY, displayWidth, displayHeight
+          );
+        } else {
+          ctx.drawImage(img, displayX, displayY, displayWidth, displayHeight);
+        }
       } else {
         // プレースホルダを描画（ボードや読み込み中の画像/PDF用）
         ctx.fillStyle = '#e5e7eb';
@@ -253,7 +299,7 @@ export function WhiteboardCanvas({
     }
     
     ctx.restore();
-  }, [activeStrokes, activeOverlays, overlayImages, selectedOverlayId, dragPreview, currentStroke, transform, cursors]);
+  }, [activeStrokes, activeOverlays, overlayImages, overlayAssetTypes, selectedOverlayId, dragPreview, currentStroke, transform, cursors]);
 
   // 描画ループ
   useEffect(() => {
@@ -327,6 +373,12 @@ export function WhiteboardCanvas({
     
     // ポインタを追跡
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    
+    // 前のドラッグ状態をクリア
+    dragModeRef.current = 'none';
+    dragStartRef.current = null;
+    dragOverlayInitialRef.current = null;
+    setDragPreview(null);
     
     // 2本指でピンチ/パンモード
     if (pointersRef.current.size === 2) {
@@ -509,6 +561,7 @@ export function WhiteboardCanvas({
         let newY = initial.y;
         let newWidth = initial.width;
         let newHeight = initial.height;
+        const aspectRatio = initial.width / initial.height;
         
         switch (dragModeRef.current) {
           case 'resize-nw':
@@ -516,20 +569,34 @@ export function WhiteboardCanvas({
             newY = initial.y + dy;
             newWidth = initial.width - dx;
             newHeight = initial.height - dy;
+            if (shiftPressed) {
+              newHeight = newWidth / aspectRatio;
+              newY = initial.y + initial.height - newHeight;
+            }
             break;
           case 'resize-ne':
             newY = initial.y + dy;
             newWidth = initial.width + dx;
             newHeight = initial.height - dy;
+            if (shiftPressed) {
+              newHeight = newWidth / aspectRatio;
+              newY = initial.y + initial.height - newHeight;
+            }
             break;
           case 'resize-se':
             newWidth = initial.width + dx;
             newHeight = initial.height + dy;
+            if (shiftPressed) {
+              newHeight = newWidth / aspectRatio;
+            }
             break;
           case 'resize-sw':
             newX = initial.x + dx;
             newWidth = initial.width - dx;
             newHeight = initial.height + dy;
+            if (shiftPressed) {
+              newHeight = newWidth / aspectRatio;
+            }
             break;
         }
         
@@ -539,12 +606,18 @@ export function WhiteboardCanvas({
             newX = initial.x + initial.width - 20;
           }
           newWidth = 20;
+          if (shiftPressed) {
+            newHeight = newWidth / aspectRatio;
+          }
         }
         if (newHeight < 20) {
           if (dragModeRef.current === 'resize-nw' || dragModeRef.current === 'resize-ne') {
             newY = initial.y + initial.height - 20;
           }
           newHeight = 20;
+          if (shiftPressed) {
+            newWidth = newHeight * aspectRatio;
+          }
         }
         
         setDragPreview({ x: newX, y: newY, width: newWidth, height: newHeight });
@@ -701,6 +774,28 @@ export function WhiteboardCanvas({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedOverlayId, sessionId, onRemoveOverlayEvent, onSelectOverlay]);
 
+  // ダブルクリックでオーバーレイを編集
+  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
+    if (!onDoubleClickOverlay) return;
+    if (tool !== 'select') return;
+    
+    const point = screenToCanvas(e.clientX, e.clientY);
+    
+    // オーバーレイをクリックしたかチェック（z-indexが高い順）
+    for (let i = activeOverlays.length - 1; i >= 0; i--) {
+      const overlay = activeOverlays[i];
+      if (
+        point.x >= overlay.x &&
+        point.x <= overlay.x + overlay.width &&
+        point.y >= overlay.y &&
+        point.y <= overlay.y + overlay.height
+      ) {
+        onDoubleClickOverlay(overlay.overlayId);
+        return;
+      }
+    }
+  }, [tool, activeOverlays, screenToCanvas, onDoubleClickOverlay]);
+
   return (
     <div 
       ref={containerRef}
@@ -725,6 +820,7 @@ export function WhiteboardCanvas({
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerLeave}
         onWheel={handleWheel}
+        onDoubleClick={handleDoubleClick}
       />
     </div>
   );

@@ -36,6 +36,11 @@ export function generateRemoveId(): string {
   return `r:${randomString(12)}`;
 }
 
+/** ビューポート変更 ID を生成 (v:xxx) */
+export function generateViewportId(): string {
+  return `v:${randomString(12)}`;
+}
+
 /** UUID v4 を生成 */
 export function generateUuid(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {

@@ -15,6 +15,7 @@ import type {
   OverlayAddEvent,
   OverlayRemoveEvent,
   OverlayTransformEvent,
+  OverlayViewportEvent,
   OverlayState,
   Operation,
 } from '../types';
@@ -69,6 +70,7 @@ export interface UseYjsReturn {
   addOverlayEvent: (event: OverlayAddEvent) => void;
   removeOverlayEvent: (event: OverlayRemoveEvent, targetOverlays: OverlayAddEvent[]) => void;
   transformOverlayEvent: (event: OverlayTransformEvent, before: { x: number; y: number; width: number; height: number; rotation: number }) => void;
+  viewportOverlayEvent: (event: OverlayViewportEvent, before: { viewport: { x: number; y: number; width: number; height: number }; page: number }) => void;
   performUndo: () => void;
   performRedo: () => void;
   canUndo: boolean;
@@ -486,6 +488,23 @@ export function useYjs({
     setRedoStack([]);
   }, []);
 
+  // オーバーレイ viewport 変更
+  const viewportOverlayEvent = useCallback((
+    event: OverlayViewportEvent,
+    before: { viewport: { x: number; y: number; width: number; height: number }; page: number }
+  ) => {
+    if (!yEventsRef.current) return;
+    const e = { ...event, sessionId: event.sessionId || sessionIdRef.current };
+    yEventsRef.current.push([e]);
+    setUndoStack(prev => [...prev, { 
+      type: 'overlayViewport', 
+      overlayId: e.overlayId,
+      before,
+      after: { viewport: e.viewport, page: e.page }
+    }]);
+    setRedoStack([]);
+  }, []);
+
   // Undo/Redo
   const performUndo = useCallback(() => {
     if (undoStack.length === 0 || !yEventsRef.current) return;
@@ -530,6 +549,16 @@ export function useYjs({
         height: op.before.height,
         rotation: op.before.rotation,
       }]);
+    } else if (op.type === 'overlayViewport') {
+      // viewport を前の状態に戻す
+      yEventsRef.current.push([{
+        type: 'OV',
+        timestamp: getTimestamp(),
+        sessionId: sessionIdRef.current,
+        overlayId: op.overlayId,
+        viewport: op.before.viewport,
+        page: op.before.page,
+      }]);
     }
     
     setUndoStack(prev => prev.slice(0, -1));
@@ -572,6 +601,16 @@ export function useYjs({
         width: op.after.width,
         height: op.after.height,
         rotation: op.after.rotation,
+      }]);
+    } else if (op.type === 'overlayViewport') {
+      // viewport を後の状態に戻す
+      yEventsRef.current.push([{
+        type: 'OV',
+        timestamp: getTimestamp(),
+        sessionId: sessionIdRef.current,
+        overlayId: op.overlayId,
+        viewport: op.after.viewport,
+        page: op.after.page,
       }]);
     }
     
@@ -649,6 +688,7 @@ export function useYjs({
     addOverlayEvent,
     removeOverlayEvent,
     transformOverlayEvent,
+    viewportOverlayEvent,
     performUndo,
     performRedo,
     canUndo: undoStack.length > 0,
