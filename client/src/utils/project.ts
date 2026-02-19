@@ -30,6 +30,8 @@ export interface Project {
   config: ProjectConfig;
   assetIndex: AssetIndex;
   boards: Map<string, WbelxEvent[]>;  // id → events
+  /** uuid → { data, mimeType } のアセットバイナリ（画像・PDF等） */
+  assetFiles: Map<string, { data: ArrayBuffer; mimeType: string; fileName: string }>;
 }
 
 // ========================================
@@ -64,6 +66,7 @@ export function createNewProject(name: string): Project {
     config,
     assetIndex,
     boards: new Map([[boardId, []]]),
+    assetFiles: new Map(),
   };
 }
 
@@ -166,7 +169,23 @@ export async function loadProject(file: File): Promise<Project> {
     }
   }
 
-  return { config, assetIndex, boards };
+  // アセットファイル（画像・PDF等）を読み込み
+  const assetFiles = new Map<string, { data: ArrayBuffer; mimeType: string; fileName: string }>();
+  for (const [uuid, assetInfo] of config.assets) {
+    const asset = assetIndex.byUuid.get(uuid);
+    const relativePath = asset?.relativePath || `assets/${uuid}`;
+    const assetFile = zip.file(relativePath);
+    if (assetFile) {
+      const data = await assetFile.async('arraybuffer');
+      assetFiles.set(uuid, {
+        data,
+        mimeType: assetInfo.mimeType,
+        fileName: assetFile.name.split('/').pop() || uuid,
+      });
+    }
+  }
+
+  return { config, assetIndex, boards, assetFiles };
 }
 
 /**
@@ -192,7 +211,19 @@ export async function saveProject(project: Project): Promise<Blob> {
     wbassetFolder?.file(`${uuid}.wbasset`, wbassetToToml(asset));
   }
 
-  // imported/ (TODO: バイナリファイルの処理)
+  // assets/ バイナリ
+  if (project.assetFiles.size > 0) {
+    const assetsFolder = zip.folder('assets');
+    for (const [uuid, file] of project.assetFiles) {
+      const asset = project.assetIndex.byUuid.get(uuid);
+      if (asset && asset.type !== 'board') {
+        // relative_path から assets/ 以降のファイル名を取得
+        const fileName = asset.relativePath.replace(/^assets\//, '');
+        assetsFolder?.file(fileName, file.data);
+      }
+    }
+  }
+
   // thumbnails/ (TODO: サムネイル生成)
 
   return zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });

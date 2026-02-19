@@ -1604,11 +1604,11 @@ body {
   text-align: center;
 }
 
+
 /* ============================================================
-   Viewport Editor
    Overlay Inline Controls
    canvas-container の上に absolute 配置されるフローティングUI
-============================================================ */
+   ============================================================ */
 
 .overlay-inline-controls {
   position: absolute;

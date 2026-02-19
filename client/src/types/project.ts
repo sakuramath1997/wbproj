@@ -30,6 +30,12 @@ export interface BackgroundConfig {
   patternColor: string;       // hex
 }
 
+/** [rendering] セクション */
+export interface RenderingConfig {
+  boardOverlayMargin: number;
+  boardOverlayFallbackViewport: { x: number; y: number; width: number; height: number };
+}
+
 /** [collaboration] セクション */
 export interface CollaborationConfig {
   signalingServer?: string;   // wss:// URL
@@ -60,9 +66,10 @@ export interface ImportedAssetInfo {
 export interface ProjectConfig {
   project: ProjectInfo;
   background: BackgroundConfig;
+  rendering: RenderingConfig;
   collaboration: CollaborationConfig;
-  boards: Map<string, BoardInfo>;           // id → BoardInfo
-  assets: Map<string, ImportedAssetInfo>;   // uuid → ImportedAssetInfo
+  boards: Map<string, BoardInfo>;
+  assets: Map<string, ImportedAssetInfo>;
 }
 
 // ========================================
@@ -74,6 +81,11 @@ export const DEFAULT_BACKGROUND: BackgroundConfig = {
   pattern: 'none',
   patternSize: 20,
   patternColor: '#e0e0e0',
+};
+
+export const DEFAULT_RENDERING: RenderingConfig = {
+  boardOverlayMargin: 50,
+  boardOverlayFallbackViewport: { x: -960, y: -540, width: 1920, height: 1080 },
 };
 
 export const DEFAULT_COLLABORATION: CollaborationConfig = {
@@ -89,12 +101,13 @@ export function createProjectConfig(name: string): ProjectConfig {
   const now = new Date().toISOString();
   return {
     project: {
-      version: '1.0',
+      version: '2.0',
       name,
       createdAt: now,
       updatedAt: now,
     },
     background: { ...DEFAULT_BACKGROUND },
+    rendering: { ...DEFAULT_RENDERING, boardOverlayFallbackViewport: { ...DEFAULT_RENDERING.boardOverlayFallbackViewport } },
     collaboration: { ...DEFAULT_COLLABORATION },
     boards: new Map(),
     assets: new Map(),
@@ -137,6 +150,13 @@ export function projectConfigToToml(config: ProjectConfig): string {
   lines.push(`pattern = "${config.background.pattern}"`);
   lines.push(`pattern_size = ${config.background.patternSize}`);
   lines.push(`pattern_color = "${config.background.patternColor}"`);
+  lines.push('');
+
+  // [rendering]
+  lines.push('[rendering]');
+  lines.push(`board_overlay_margin = ${config.rendering.boardOverlayMargin}`);
+  const fv = config.rendering.boardOverlayFallbackViewport;
+  lines.push(`board_overlay_fallback_viewport = { x = ${fv.x}, y = ${fv.y}, width = ${fv.width}, height = ${fv.height} }`);
   lines.push('');
 
   // [collaboration]

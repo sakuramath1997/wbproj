@@ -204,7 +204,7 @@ export function ViewportEditorBoard({
     setIsContentReady(false);
     setIsLoading(true);
 
-    loadBoardEventsAsync(boardId).then((events) => {
+    loadBoardEventsAsync(boardId).then((events: import('../types').WbelxEvent[]) => {
       const state = computeState(events);
       const loadedStrokes = getActiveStrokes(state);
       const loadedOverlays = getActiveOverlays(state);
@@ -315,12 +315,12 @@ export function ViewportEditorBoard({
 
     const current = overlayImagesRef.current;
     // overlayId でキー管理（同一アセット・異なるページ/viewportに対応）
-    const toLoad = overlays.filter(o => o.assetUuid && !current.has(o.overlayId));
+    const toLoad = overlays.filter((o: OverlayState) => o.assetUuid && !current.has(o.overlayId));
     if (toLoad.length === 0) return;
 
     let cancelled = false;
     Promise.all(
-      toLoad.map(async (o): Promise<[string, HTMLImageElement] | null> => {
+      toLoad.map(async (o: OverlayState): Promise<[string, HTMLImageElement] | null> => {
         const assetType = project.assetIndex.byUuid.get(o.assetUuid)?.type ?? 'image';
         try {
           if (assetType === 'image') {

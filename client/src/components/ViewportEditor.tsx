@@ -218,7 +218,7 @@ export function ViewportEditor({
     <div className="viewport-editor-backdrop" onClick={onClose}>
       <div
         className="viewport-editor-modal"
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e: React.MouseEvent<HTMLDivElement>) => e.stopPropagation()}
       >
         {/* ヘッダー */}
         <div className="viewport-editor-header">
@@ -233,7 +233,7 @@ export function ViewportEditor({
           <div className="viewport-editor-asset-dropdown-container">
             <button
               className="viewport-editor-asset-button"
-              onClick={() => setShowDropdown((v) => !v)}
+              onClick={() => setShowDropdown((v: boolean) => !v)}
             >
               {currentAssetName}
               <span className="dropdown-arrow">▼</span>
@@ -321,7 +321,7 @@ export function ViewportEditor({
               <input
                 type="checkbox"
                 checked={lockAspectRatioLocal}
-                onChange={(e) => setLockAspectRatioLocal(e.target.checked)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setLockAspectRatioLocal(e.target.checked)}
               />
               アスペクト比を固定する
             </label>

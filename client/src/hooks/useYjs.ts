@@ -2,7 +2,7 @@
  * useYjs - シンプルな P2P コラボレーションフック
  */
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import * as Y from 'yjs';
 import { WebrtcProvider } from 'y-webrtc';
 import type { 
@@ -21,8 +21,8 @@ import type {
   Operation,
 } from '../types';
 import { computeState, getActiveStrokes, getActiveOverlays } from '../utils/statemachine';
-import { generateEraseId, getTimestamp, getOrCreateSessionId } from '../utils/common';
-import { eventsToWbelx } from '../utils/wbelx-parser';
+import { generateEraseId, getTimestamp, getOrCreateSessionId, generateSnapshotHash } from '../utils/common';
+import { eventsToWbelx, createSnapshot } from '../utils/wbelx-parser';
 
 // シグナリングサーバー
 const getSignalingServers = (): string[] => {
@@ -70,9 +70,9 @@ export interface UseYjsReturn {
   addEraseEvent: (event: EraseEvent, targetStrokes: DrawEvent[]) => void;
   addOverlayEvent: (event: OverlayAddEvent) => void;
   removeOverlayEvent: (event: OverlayRemoveEvent, targetOverlays: OverlayAddEvent[]) => void;
-  transformOverlayEvent: (event: OverlayTransformEvent, before: { x: number; y: number; width: number; height: number; rotation: number }) => void;
-  viewportOverlayEvent: (event: OverlayViewportEvent, before: { viewport: { x: number; y: number; width: number; height: number }; page: number }) => void;
-  styleOverlayEvent: (event: OverlayStyleEvent, before: { zIndex: number; opacity: number }) => void;
+  transformOverlayEvent: (event: OverlayTransformEvent, before: Partial<{ x: number; y: number; width: number; height: number; rotation: number }>) => void;
+  viewportOverlayEvent: (event: OverlayViewportEvent, before: Partial<{ viewport: { x: number; y: number; width: number; height: number }; page: number }>) => void;
+  styleOverlayEvent: (event: OverlayStyleEvent, befores: Array<{ overlayId: string; before: Partial<{ zIndex: number; opacity: number }> }>) => void;
   performUndo: () => void;
   performRedo: () => void;
   canUndo: boolean;
@@ -140,9 +140,55 @@ export function useYjs({
     onPeerLeaveRef.current = onPeerLeave;
   }, [onPeerJoin, onPeerLeave]);
 
+  const initialEventsRef = useRef(initialEvents);
+  useEffect(() => { initialEventsRef.current = initialEvents; }, [initialEvents]);
+
+  // Y.Doc は常時初期化（roomId なし＝スタンドアロンでもローカル編集可能にする）
+  useEffect(() => {
+    const ydoc = new Y.Doc();
+    ydocRef.current = ydoc;
+    const yEvents = ydoc.getArray<WbelxEvent>('events');
+    yEventsRef.current = yEvents;
+
+    // イベント監視（ローカル編集にも対応）
+    const observeLocal = () => {
+      const all = yEvents.toArray();
+      setEvents(all);
+      setState(computeState(all));
+    };
+    yEvents.observe(observeLocal);
+
+    // initialEvents をロード（スタンドアロン時）
+    if (isHost && initialEventsRef.current.length > 0) {
+      ydoc.transact(() => {
+        for (const e of initialEventsRef.current) {
+          yEvents.push([e]);
+        }
+      });
+      const initialUndoStack: StrokeOperation[] = [];
+      for (const e of initialEventsRef.current) {
+        if (e.type === 'D') {
+          initialUndoStack.push({ type: 'draw', strokeId: e.id, strokeData: e });
+        }
+      }
+      if (initialUndoStack.length > 0) setUndoStack(initialUndoStack);
+    }
+
+    return () => {
+      yEvents.unobserve(observeLocal);
+      ydoc.destroy();
+      ydocRef.current = null;
+      yEventsRef.current = null;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // マウント時1回のみ（initialEventsはref経由で参照）
+
+  // WebrtcProvider: roomId がある場合のみ接続
   useEffect(() => {
     if (!enabled || !roomId) return;
-
+    const ydoc = ydocRef.current;
+    const yEvents = yEventsRef.current;
+    if (!ydoc || !yEvents) return;
 
     // リセット
     setIsJoiningRoom(true);
@@ -151,11 +197,6 @@ export function useYjs({
     setIsHostConnected(isHost);
     setGuestsPresent(false);
     initialLoadedRef.current = false;
-
-    const ydoc = new Y.Doc();
-    ydocRef.current = ydoc;
-    const yEvents = ydoc.getArray<WbelxEvent>('events');
-    yEventsRef.current = yEvents;
 
     const provider = new WebrtcProvider(roomId, ydoc, {
       signaling: getSignalingServers(),
@@ -176,16 +217,16 @@ export function useYjs({
         initialLoadedRef.current = true;
         return;
       }
-      if (initialEvents.length > 0) {
+      if (initialEventsRef.current.length > 0) {
         ydoc.transact(() => {
-          for (const e of initialEvents) {
+          for (const e of initialEventsRef.current) {
             yEvents.push([e]);
           }
         });
-        
+
         // 初期イベントから undoStack を構築（DrawEvent のみ）
         const initialUndoStack: StrokeOperation[] = [];
-        for (const e of initialEvents) {
+        for (const e of initialEventsRef.current) {
           if (e.type === 'D') {
             initialUndoStack.push({
               type: 'draw',
@@ -273,7 +314,13 @@ export function useYjs({
       const incomingRequests: string[] = [];
       const incomingResponses: Array<{ uuid: string; data: string; mimeType: string }> = [];
 
-      states.forEach((st, clientId) => {
+      states.forEach((st: {
+        isHost?: boolean;
+        user?: { id: string; name: string; color: string };
+        cursor?: { x: number; y: number };
+        assetRequests?: string[];
+        assetResponse?: { uuid: string; data: string; mimeType: string };
+      }, clientId: number) => {
         if (clientId === awareness.clientID) return;
         count++;
         if (st.isHost) foundHost = true;
@@ -315,7 +362,7 @@ export function useYjs({
       });
       
       // 切断したピアを検出
-      knownPeersRef.current.forEach((name, clientId) => {
+      knownPeersRef.current.forEach((name: string, clientId: number) => {
         if (!currentPeers.has(clientId)) {
           onPeerLeaveRef.current?.(name);
         }
@@ -338,7 +385,7 @@ export function useYjs({
       
       // アセットレスポンスを処理
       if (incomingResponses.length > 0) {
-        setReceivedAssets(prev => {
+        setReceivedAssets((prev: Map<string, { data: string; mimeType: string }>) => {
           const next = new Map(prev);
           for (const resp of incomingResponses) {
             if (!next.has(resp.uuid)) {
@@ -367,25 +414,25 @@ export function useYjs({
       awareness.off('change', updateAwareness);
       yEvents.unobserve(observeEvents);
       provider.destroy();
-      ydoc.destroy();
+      // ydoc は別 useEffect で管理するためここでは破棄しない
     };
-  }, [roomId, enabled, isHost, initialEvents]);
+  }, [roomId, enabled, isHost]); // initialEvents は ref 経由で参照
 
   // イベント追加
   const addDrawEvent = useCallback((event: DrawEvent) => {
     if (!yEventsRef.current) return;
     const e = { ...event, sessionId: event.sessionId || sessionIdRef.current };
     yEventsRef.current.push([e]);
-    setUndoStack(prev => [...prev, { type: 'draw', strokeId: e.id, strokeData: e }]);
-    setRedoStack([]);
+    setUndoStack((prev: Operation[]) => [...prev, { type: 'draw', strokeId: e.id, strokeData: e }]);
+    setRedoStack((_prev: Operation[]) => []);
   }, []);
 
   const addEraseEvent = useCallback((event: EraseEvent, targetStrokes: DrawEvent[]) => {
     if (!yEventsRef.current) return;
     const e = { ...event, sessionId: event.sessionId || sessionIdRef.current };
     yEventsRef.current.push([e]);
-    setUndoStack(prev => [...prev, { type: 'erase', eraseId: e.id, targetIds: e.targetIds, targetStrokes }]);
-    setRedoStack([]);
+    setUndoStack((prev: Operation[]) => [...prev, { type: 'erase', eraseId: e.id, targetIds: e.targetIds, targetStrokes }]);
+    setRedoStack((_prev: Operation[]) => []);
   }, []);
 
   // オーバーレイ追加
@@ -393,8 +440,8 @@ export function useYjs({
     if (!yEventsRef.current) return;
     const e = { ...event, sessionId: event.sessionId || sessionIdRef.current };
     yEventsRef.current.push([e]);
-    setUndoStack(prev => [...prev, { type: 'overlayAdd', overlayId: e.overlayId, overlayData: e }]);
-    setRedoStack([]);
+    setUndoStack((prev: Operation[]) => [...prev, { type: 'overlayAdd', overlayId: e.overlayId, overlayData: e }]);
+    setRedoStack((_prev: Operation[]) => []);
   }, []);
 
   // アセットをリクエスト（ゲスト用）
@@ -405,7 +452,7 @@ export function useYjs({
     // 既にリクエスト中ならスキップ
     if (pendingAssetRequests.has(uuid)) return;
     
-    setPendingAssetRequests(prev => new Set(prev).add(uuid));
+    setPendingAssetRequests((prev: Set<string>) => new Set(prev).add(uuid));
     
     const currentState = a.getLocalState() || {};
     const currentRequests = currentState.assetRequests || [];
@@ -445,7 +492,7 @@ export function useYjs({
     const a = providerRef.current?.awareness;
     if (!a) return;
     
-    setPendingAssetRequests(prev => {
+    setPendingAssetRequests((prev: Set<string>) => {
       const next = new Set(prev);
       next.delete(uuid);
       return next;
@@ -464,71 +511,84 @@ export function useYjs({
     if (!yEventsRef.current) return;
     const e = { ...event, sessionId: event.sessionId || sessionIdRef.current };
     yEventsRef.current.push([e]);
-    setUndoStack(prev => [...prev, { 
+    setUndoStack((prev: Operation[]) => [...prev, { 
       type: 'overlayRemove', 
       removeId: e.removeId, 
       targetOverlayIds: e.targetOverlayIds,
       targetOverlays 
     }]);
-    setRedoStack([]);
+    setRedoStack((_prev: Operation[]) => []);
   }, []);
 
-  // オーバーレイ移動/リサイズ
+  // オーバーレイ移動/リサイズ（差分記録）
   const transformOverlayEvent = useCallback((
     event: OverlayTransformEvent,
-    before: { x: number; y: number; width: number; height: number; rotation: number }
+    before: Partial<{ x: number; y: number; width: number; height: number; rotation: number }>
   ) => {
     if (!yEventsRef.current) return;
     const e = { ...event, sessionId: event.sessionId || sessionIdRef.current };
     yEventsRef.current.push([e]);
-    setUndoStack(prev => [...prev, { 
-      type: 'overlayTransform', 
+    // after は event に存在するフィールドのみ
+    const after: typeof before = {};
+    if (e.x        !== undefined) after.x        = e.x;
+    if (e.y        !== undefined) after.y        = e.y;
+    if (e.width    !== undefined) after.width    = e.width;
+    if (e.height   !== undefined) after.height   = e.height;
+    if (e.rotation !== undefined) after.rotation = e.rotation;
+    setUndoStack((prev: Operation[]) => [...prev, {
+      type: 'overlayTransform',
       overlayId: e.overlayId,
       before,
-      after: { x: e.x, y: e.y, width: e.width, height: e.height, rotation: e.rotation }
+      after,
     }]);
-    setRedoStack([]);
+    setRedoStack((_prev: Operation[]) => []);
   }, []);
 
-  // オーバーレイ viewport 変更
+  // オーバーレイ viewport 変更（差分記録）
   const viewportOverlayEvent = useCallback((
     event: OverlayViewportEvent,
-    before: { viewport: { x: number; y: number; width: number; height: number }; page: number }
+    before: Partial<{ viewport: { x: number; y: number; width: number; height: number }; page: number }>
   ) => {
     if (!yEventsRef.current) return;
     const e = { ...event, sessionId: event.sessionId || sessionIdRef.current };
     yEventsRef.current.push([e]);
-    setUndoStack(prev => [...prev, { 
-      type: 'overlayViewport', 
+    const after: typeof before = {};
+    if (e.viewport !== undefined) after.viewport = e.viewport;
+    if (e.page     !== undefined) after.page     = e.page;
+    setUndoStack((prev: Operation[]) => [...prev, {
+      type: 'overlayViewport',
       overlayId: e.overlayId,
       before,
-      after: { viewport: e.viewport, page: e.page }
+      after,
     }]);
-    setRedoStack([]);
+    setRedoStack((_prev: Operation[]) => []);
   }, []);
 
-  // オーバーレイ style 変更（opacity / zIndex）
+  // オーバーレイ style 変更（複数ターゲット・差分記録）
   const styleOverlayEvent = useCallback((
     event: OverlayStyleEvent,
-    before: { zIndex: number; opacity: number }
+    befores: Array<{ overlayId: string; before: Partial<{ zIndex: number; opacity: number }> }>
   ) => {
     if (!yEventsRef.current) return;
     const e = { ...event, sessionId: event.sessionId || sessionIdRef.current };
     yEventsRef.current.push([e]);
-    setUndoStack(prev => [...prev, {
-      type: 'overlayStyle',
-      overlayId: e.overlayId,
-      before,
-      after: { zIndex: e.zIndex, opacity: e.opacity },
-    }]);
-    setRedoStack([]);
+    // changes: before/after を overlayId でペアリング
+    const changes = befores.map(({ overlayId, before }) => {
+      const target = e.targets.find(t => t.overlayId === overlayId);
+      const after: Partial<{ zIndex: number; opacity: number }> = {};
+      if (target?.zIndex  !== undefined) after.zIndex  = target.zIndex;
+      if (target?.opacity !== undefined) after.opacity = target.opacity;
+      return { overlayId, before, after };
+    });
+    setUndoStack((prev: Operation[]) => [...prev, { type: 'overlayStyle', changes }]);
+    setRedoStack((_prev: Operation[]) => []);
   }, []);
 
   // Undo/Redo
   const performUndo = useCallback(() => {
     if (undoStack.length === 0 || !yEventsRef.current) return;
     const op = undoStack[undoStack.length - 1];
-    
+
     if (op.type === 'draw') {
       if (!state.activeStrokeIds.has(op.strokeId)) return;
       yEventsRef.current.push([{
@@ -556,47 +616,40 @@ export function useYjs({
         yEventsRef.current.push([{ ...overlay, timestamp: getTimestamp(), sessionId: sessionIdRef.current }]);
       }
     } else if (op.type === 'overlayTransform') {
-      // 変形前の状態に戻す
+      // 変更されたフィールドのみ before 値で戻す
       yEventsRef.current.push([{
         type: 'OT',
         timestamp: getTimestamp(),
         sessionId: sessionIdRef.current,
         overlayId: op.overlayId,
-        x: op.before.x,
-        y: op.before.y,
-        width: op.before.width,
-        height: op.before.height,
-        rotation: op.before.rotation,
+        ...op.before,
       }]);
     } else if (op.type === 'overlayViewport') {
-      // viewport を前の状態に戻す
       yEventsRef.current.push([{
         type: 'OV',
         timestamp: getTimestamp(),
         sessionId: sessionIdRef.current,
         overlayId: op.overlayId,
-        viewport: op.before.viewport,
-        page: op.before.page,
+        ...op.before,
       }]);
     } else if (op.type === 'overlayStyle') {
+      // 全 change の before を OS 1本で戻す
       yEventsRef.current.push([{
         type: 'OS',
         timestamp: getTimestamp(),
         sessionId: sessionIdRef.current,
-        overlayId: op.overlayId,
-        zIndex: op.before.zIndex,
-        opacity: op.before.opacity,
+        targets: op.changes.map((c: { overlayId: string; before: Partial<{ zIndex: number; opacity: number }> }) => ({ overlayId: c.overlayId, ...c.before })),
       }]);
     }
-    
-    setUndoStack(prev => prev.slice(0, -1));
-    setRedoStack(prev => [...prev, op]);
+
+    setUndoStack((prev: Operation[]) => prev.slice(0, -1));
+    setRedoStack((prev: Operation[]) => [...prev, op]);
   }, [undoStack, state.activeStrokeIds, state.activeOverlayIds]);
 
   const performRedo = useCallback(() => {
     if (redoStack.length === 0 || !yEventsRef.current) return;
     const op = redoStack[redoStack.length - 1];
-    
+
     if (op.type === 'draw') {
       yEventsRef.current.push([{ ...op.strokeData, timestamp: getTimestamp(), sessionId: sessionIdRef.current }]);
     } else if (op.type === 'erase') {
@@ -618,41 +671,32 @@ export function useYjs({
         targetOverlayIds: op.targetOverlayIds,
       }]);
     } else if (op.type === 'overlayTransform') {
-      // 変形後の状態を再適用
       yEventsRef.current.push([{
         type: 'OT',
         timestamp: getTimestamp(),
         sessionId: sessionIdRef.current,
         overlayId: op.overlayId,
-        x: op.after.x,
-        y: op.after.y,
-        width: op.after.width,
-        height: op.after.height,
-        rotation: op.after.rotation,
+        ...op.after,
       }]);
     } else if (op.type === 'overlayViewport') {
-      // viewport を後の状態に戻す
       yEventsRef.current.push([{
         type: 'OV',
         timestamp: getTimestamp(),
         sessionId: sessionIdRef.current,
         overlayId: op.overlayId,
-        viewport: op.after.viewport,
-        page: op.after.page,
+        ...op.after,
       }]);
     } else if (op.type === 'overlayStyle') {
       yEventsRef.current.push([{
         type: 'OS',
         timestamp: getTimestamp(),
         sessionId: sessionIdRef.current,
-        overlayId: op.overlayId,
-        zIndex: op.after.zIndex,
-        opacity: op.after.opacity,
+        targets: op.changes.map((c: { overlayId: string; after: Partial<{ zIndex: number; opacity: number }> }) => ({ overlayId: c.overlayId, ...c.after })),
       }]);
     }
-    
-    setRedoStack(prev => prev.slice(0, -1));
-    setUndoStack(prev => [...prev, op]);
+
+    setRedoStack((prev: Operation[]) => prev.slice(0, -1));
+    setUndoStack((prev: Operation[]) => [...prev, op]);
   }, [redoStack]);
 
   // カーソル
@@ -700,10 +744,13 @@ export function useYjs({
       }
     }
     
-    const h = `#SNAPSHOT,${Date.now().toString(36)}`;
-    const b = eventsToWbelx(snaps);
-    return b ? `${h}\n${b}` : h;
+    const h = generateSnapshotHash();
+    return createSnapshot(snaps, h);
   }, [state]);
+
+  // state が変わらない限り同じ参照を返す（BoardEditor の useEffect 無限ループ防止）
+  const activeStrokes = useMemo(() => getActiveStrokes(state), [state]);
+  const activeOverlays = useMemo(() => getActiveOverlays(state), [state]);
 
   return {
     isConnected,
@@ -717,8 +764,8 @@ export function useYjs({
     hasSyncedData,
     events,
     state,
-    activeStrokes: getActiveStrokes(state),
-    activeOverlays: getActiveOverlays(state),
+    activeStrokes,
+    activeOverlays,
     cursors,
     addDrawEvent,
     addEraseEvent,

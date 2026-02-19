@@ -401,7 +401,7 @@ export function ViewportEditorPdf({
           max={totalPages}
           value={page}
           disabled={isLoadingPdf}
-          onChange={(e) => {
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
             const p = parseInt(e.target.value, 10);
             if (p >= 1 && p <= totalPages) onPageChange(p);
           }}

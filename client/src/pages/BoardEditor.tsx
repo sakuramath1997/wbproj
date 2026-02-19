@@ -16,6 +16,7 @@ import type {
   OverlayTransformEvent,
   OverlayViewportEvent,
   OverlayStyleEvent,
+  OverlayState,
   AssetType,
   CanvasTransform,
 } from '../types';
@@ -112,10 +113,10 @@ export function BoardEditor() {
   // 通知を追加
   const addNotification = useCallback((type: 'join' | 'leave', name: string) => {
     const id = ++notificationIdCounter;
-    setNotifications(prev => [...prev, { id, type, name }]);
+    setNotifications((prev: Notification[]) => [...prev, { id, type, name }]);
     // 3秒後に自動削除
     setTimeout(() => {
-      setNotifications(prev => prev.filter(n => n.id !== id));
+      setNotifications((prev: Notification[]) => prev.filter((n: Notification) => n.id !== id));
     }, 3000);
   }, []);
   
@@ -504,7 +505,7 @@ export function BoardEditor() {
       setOverlayImages(newImages);
       // 再生成が完了した overlayId を loading から除外
       if (missingUuids.length === 0) {
-        setLoadingOverlayIds(prev => {
+        setLoadingOverlayIds((prev: Set<string>) => {
           if (prev.size === 0) return prev;
           const next = new Set<string>(prev);
           for (const id of next) {
@@ -547,7 +548,7 @@ export function BoardEditor() {
       }
       
       if (newCounts.size > 0) {
-        setPdfPageCounts(prev => new Map([...prev, ...newCounts]));
+        setPdfPageCounts((prev: Map<string, number>) => new Map([...prev, ...newCounts]));
       }
     };
     
@@ -581,22 +582,26 @@ export function BoardEditor() {
 
   // アセット追加ハンドラ
   const handleAddAsset = useCallback(async (assetUuid: string) => {
-    // アセットタイプを取得
     const asset = project?.assetIndex.byUuid.get(assetUuid);
     const assetType = asset?.type || 'image';
 
-    // デフォルト配置: 幅 300, 重心 (250, 200)
     const DEFAULT_W = 300;
     const DEFAULT_H = 200;
     const DEFAULT_CX = 250;
     const DEFAULT_CY = 200;
-    const DEFAULT_AREA = DEFAULT_W * DEFAULT_H; // 60000
+    const DEFAULT_AREA = DEFAULT_W * DEFAULT_H;
+
+    // rendering 設定（project から取得、なければデフォルト）
+    const margin   = project?.config.rendering.boardOverlayMargin ?? 50;
+    const fallback = project?.config.rendering.boardOverlayFallbackViewport
+      ?? { x: -960, y: -540, width: 1920, height: 1080 };
 
     let width = DEFAULT_W;
     let height = DEFAULT_H;
+    // board overlay の viewport（センチネル廃止: 必ず実際の値を設定）
+    let overlayViewport = { x: 0, y: 0, width: 0, height: 0 };
 
     if (assetType === 'document') {
-      // PDF: 1ページ目のアスペクト比を取得
       try {
         const dataUrl = await loadAssetFileAsDataUrl(assetUuid);
         if (dataUrl) {
@@ -612,7 +617,6 @@ export function BoardEditor() {
       }
 
     } else if (assetType === 'board') {
-      // ボード: コンテンツ BBox からアスペクト比を決定
       try {
         const boards = getBoards();
         let boardId: string | null = null;
@@ -639,19 +643,28 @@ export function BoardEditor() {
           }
 
           if (minX !== Infinity) {
-            const contentW = Math.max(maxX - minX, 1);
-            const contentH = Math.max(maxY - minY, 1);
-            const ar = contentW / contentH;
-            width  = Math.round(Math.sqrt(DEFAULT_AREA * ar));
-            height = Math.round(Math.sqrt(DEFAULT_AREA / ar));
+            // コンテンツ BBox + margin を viewport として設定
+            overlayViewport = {
+              x:      minX - margin,
+              y:      minY - margin,
+              width:  maxX - minX + margin * 2,
+              height: maxY - minY + margin * 2,
+            };
+          } else {
+            // コンテンツが空 → fallback viewport
+            overlayViewport = { ...fallback };
           }
+
+          // overlay のサイズは viewport のアスペクト比に合わせる
+          const ar = overlayViewport.width / overlayViewport.height;
+          width  = Math.round(Math.sqrt(DEFAULT_AREA * ar));
+          height = Math.round(Math.sqrt(DEFAULT_AREA / ar));
         }
       } catch (error) {
         console.warn('Failed to get board dimensions:', error);
       }
     }
 
-    // 等積・重心同一になるよう配置座標を決定
     const x = Math.round(DEFAULT_CX - width  / 2);
     const y = Math.round(DEFAULT_CY - height / 2);
 
@@ -666,14 +679,13 @@ export function BoardEditor() {
       width,
       height,
       rotation: 0,
-      viewport: { x: 0, y: 0, width: 0, height: 0 },
+      viewport: overlayViewport,
       page: 1,
       zIndex: activeOverlays.length + 1,
       opacity: 1.0,
     };
     addOverlayEvent(event);
 
-    // アセット参照を更新（ボードネスト用）
     if (localBoardUuid) {
       onAssetAddedToBoard(localBoardUuid, assetUuid);
     }
@@ -936,10 +948,10 @@ export function BoardEditor() {
     // renderKey キャッシュを削除 → 次の loadImages で必ず再生成される
     overlayRenderKeyRef.current.delete(overlay.overlayId);
     // ローディング表示を開始
-    setLoadingOverlayIds(prev => new Set([...prev, overlay.overlayId]));
+    setLoadingOverlayIds((prev: Set<string>) => new Set([...prev, overlay.overlayId]));
     // AR ロック設定を保存
     if (lockAspectRatio !== undefined && overlay.overlayId) {
-      setOverlayLockAspectRatios(prev => new Map([...prev, [overlay.overlayId, lockAspectRatio]]));
+      setOverlayLockAspectRatios((prev: Map<string, boolean>) => new Map([...prev, [overlay.overlayId, lockAspectRatio]]));
     }
     // ドラッグ状態をリセットするため、選択も解除
     setSelectedOverlayId(null);
@@ -969,33 +981,26 @@ export function BoardEditor() {
       type: 'OS',
       timestamp: getTimestamp(),
       sessionId,
-      overlayId: selectedOverlay.overlayId,
-      zIndex: selectedOverlay.zIndex,
-      opacity,
+      targets: [{ overlayId: selectedOverlay.overlayId, opacity }],
     };
-    styleOverlayEvent(event, {
-      zIndex: selectedOverlay.zIndex,
-      opacity: selectedOverlay.opacity,
-    });
-    // プレビュー用オーバーライドをクリア（state が反映されるので不要になる）
+    styleOverlayEvent(event, [
+      { overlayId: selectedOverlay.overlayId, before: { opacity: selectedOverlay.opacity } },
+    ]);
     setOverlayOpacityOverrides(new Map());
   }, [selectedOverlay, sessionId, styleOverlayEvent]);
 
-  // zIndex 変更ヘルパー
+  // zIndex 変更ヘルパー（単一ターゲット）
   const changeZIndex = useCallback((newZIndex: number) => {
     if (!selectedOverlay) return;
     const event: OverlayStyleEvent = {
       type: 'OS',
       timestamp: getTimestamp(),
       sessionId,
-      overlayId: selectedOverlay.overlayId,
-      zIndex: newZIndex,
-      opacity: selectedOverlay.opacity,
+      targets: [{ overlayId: selectedOverlay.overlayId, zIndex: newZIndex }],
     };
-    styleOverlayEvent(event, {
-      zIndex: selectedOverlay.zIndex,
-      opacity: selectedOverlay.opacity,
-    });
+    styleOverlayEvent(event, [
+      { overlayId: selectedOverlay.overlayId, before: { zIndex: selectedOverlay.zIndex } },
+    ]);
   }, [selectedOverlay, sessionId, styleOverlayEvent]);
 
   // z-order: sortedOverlays は zIndex 昇順（getActiveOverlays と同じ順序）
@@ -1011,38 +1016,43 @@ export function BoardEditor() {
 
   const handleBringForward = useCallback(() => {
     if (!selectedOverlay) return;
-    const idx = sortedOverlays.findIndex(o => o.overlayId === selectedOverlay.overlayId);
-    if (idx < 0 || idx === sortedOverlays.length - 1) return;
+    const idx = sortedOverlays.findIndex((o: OverlayState) => o.overlayId === selectedOverlay.overlayId);
     const above = sortedOverlays[idx + 1];
-    // 隣と zIndex をスワップ
-    changeZIndex(above.zIndex);
-    const aboveEvent: OverlayStyleEvent = {
+    // 1本の OS イベントで swap（仕様 §5-2）
+    const event: OverlayStyleEvent = {
       type: 'OS',
       timestamp: getTimestamp(),
       sessionId,
-      overlayId: above.overlayId,
-      zIndex: selectedOverlay.zIndex,
-      opacity: above.opacity,
+      targets: [
+        { overlayId: selectedOverlay.overlayId, zIndex: above.zIndex },
+        { overlayId: above.overlayId,            zIndex: selectedOverlay.zIndex },
+      ],
     };
-    styleOverlayEvent(aboveEvent, { zIndex: above.zIndex, opacity: above.opacity });
-  }, [selectedOverlay, sortedOverlays, changeZIndex, sessionId, styleOverlayEvent]);
+    styleOverlayEvent(event, [
+      { overlayId: selectedOverlay.overlayId, before: { zIndex: selectedOverlay.zIndex } },
+      { overlayId: above.overlayId,            before: { zIndex: above.zIndex } },
+    ]);
+  }, [selectedOverlay, sortedOverlays, sessionId, styleOverlayEvent]);
 
   const handleSendBackward = useCallback(() => {
     if (!selectedOverlay) return;
-    const idx = sortedOverlays.findIndex(o => o.overlayId === selectedOverlay.overlayId);
+    const idx = sortedOverlays.findIndex((o: OverlayState) => o.overlayId === selectedOverlay.overlayId);
     if (idx <= 0) return;
     const below = sortedOverlays[idx - 1];
-    changeZIndex(below.zIndex);
-    const belowEvent: OverlayStyleEvent = {
+    const event: OverlayStyleEvent = {
       type: 'OS',
       timestamp: getTimestamp(),
       sessionId,
-      overlayId: below.overlayId,
-      zIndex: selectedOverlay.zIndex,
-      opacity: below.opacity,
+      targets: [
+        { overlayId: selectedOverlay.overlayId, zIndex: below.zIndex },
+        { overlayId: below.overlayId,            zIndex: selectedOverlay.zIndex },
+      ],
     };
-    styleOverlayEvent(belowEvent, { zIndex: below.zIndex, opacity: below.opacity });
-  }, [selectedOverlay, sortedOverlays, changeZIndex, sessionId, styleOverlayEvent]);
+    styleOverlayEvent(event, [
+      { overlayId: selectedOverlay.overlayId, before: { zIndex: selectedOverlay.zIndex } },
+      { overlayId: below.overlayId,            before: { zIndex: below.zIndex } },
+    ]);
+  }, [selectedOverlay, sortedOverlays, sessionId, styleOverlayEvent]);
 
   const handleSendToBack = useCallback(() => {
     const minZ = Math.min(...activeOverlays.map(o => o.zIndex));
@@ -1383,7 +1393,7 @@ export function BoardEditor() {
       {/* 通知 */}
       {notifications.length > 0 && (
         <div className="notifications">
-          {notifications.map(n => (
+          {notifications.map((n: Notification) => (
             <div key={n.id} className={`notification ${n.type}`}>
               {n.type === 'join' ? '👋' : '👤'} {n.name} が
               {n.type === 'join' ? '参加しました' : '退出しました'}
@@ -1446,7 +1456,7 @@ export function BoardEditor() {
           cursors={cursors}
           tool={tool}
           color={color}
-          strokeWidth={STROKE_WIDTHS[strokeWidthKey]}
+          strokeWidth={STROKE_WIDTHS[strokeWidthKey as StrokeWidthKey]}
           sessionId={sessionId}
           selectedOverlayId={selectedOverlayId}
           overlayImages={overlayImages}
@@ -1454,6 +1464,7 @@ export function BoardEditor() {
           overlayOpacityOverrides={overlayOpacityOverrides}
           overlayLockAspectRatios={overlayLockAspectRatios}
           loadingOverlayIds={loadingOverlayIds}
+          backgroundConfig={project?.config.background}
           onAddDrawEvent={addDrawEvent}
           onAddEraseEvent={addEraseEvent}
           onRemoveOverlayEvent={handleRemoveOverlay}
@@ -1467,7 +1478,7 @@ export function BoardEditor() {
 
         {/* オーバーレイ選択中: インラインコントロール */}
         {selectedOverlay && tool === 'select' && (() => {
-          const selIdx = sortedOverlays.findIndex(o => o.overlayId === selectedOverlay.overlayId);
+          const selIdx = sortedOverlays.findIndex((o: OverlayState) => o.overlayId === selectedOverlay.overlayId);
           const canBringForward = selIdx < sortedOverlays.length - 1;
           const canSendBackward = selIdx > 0;
           return (

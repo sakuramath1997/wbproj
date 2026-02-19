@@ -10,10 +10,12 @@ import { createAssetIndex, addToAssetIndex } from '../types';
 import type { 
   ProjectConfig, 
   BackgroundConfig, 
+  RenderingConfig,
   CollaborationConfig,
+  BoardInfo,
   ImportedAssetInfo,
 } from '../types/project';
-import { DEFAULT_BACKGROUND, DEFAULT_COLLABORATION } from '../types/project';
+import { DEFAULT_BACKGROUND, DEFAULT_RENDERING, DEFAULT_COLLABORATION } from '../types/project';
 
 // ========================================
 // キー生成
@@ -41,6 +43,7 @@ interface SerializedProjectConfig {
     updatedAt: string;
   };
   background: BackgroundConfig;
+  rendering?: RenderingConfig;
   collaboration: CollaborationConfig;
   boards: Array<{
     id: string;
@@ -66,6 +69,7 @@ export async function saveProjectConfig(config: ProjectConfig): Promise<void> {
   const serialized: SerializedProjectConfig = {
     project: config.project,
     background: config.background,
+    rendering: config.rendering,
     collaboration: config.collaboration,
     boards: Array.from(config.boards.values()).map(info => ({
       id: info.id,
@@ -86,8 +90,8 @@ export async function loadProjectConfig(): Promise<ProjectConfig | null> {
   const serialized = await get<SerializedProjectConfig>(KEYS.projectConfig());
   if (!serialized) return null;
   
-  const boards = new Map(
-    serialized.boards.map(b => [b.id, {
+  const boards = new Map<string, BoardInfo>(
+    serialized.boards.map((b: BoardInfo) => [b.id, {
       id: b.id,
       name: b.name,
       createdAt: b.createdAt,
@@ -99,12 +103,13 @@ export async function loadProjectConfig(): Promise<ProjectConfig | null> {
   );
   
   const assets = new Map<string, ImportedAssetInfo>(
-    (serialized.assets || []).map(a => [a.uuid, a])
+    (serialized.assets || []).map((a: ImportedAssetInfo) => [a.uuid, a])
   );
   
   return {
     project: serialized.project,
     background: serialized.background || DEFAULT_BACKGROUND,
+    rendering: serialized.rendering || { ...DEFAULT_RENDERING, boardOverlayFallbackViewport: { ...DEFAULT_RENDERING.boardOverlayFallbackViewport } },
     collaboration: serialized.collaboration || DEFAULT_COLLABORATION,
     boards,
     assets,

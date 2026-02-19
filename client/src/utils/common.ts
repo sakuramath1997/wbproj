@@ -50,9 +50,9 @@ export function generateUuid(): string {
   });
 }
 
-/** スナップショットハッシュを生成 */
+/** スナップショットハッシュを生成（sha256: プレフィックス付き） */
 export function generateSnapshotHash(): string {
-  return Date.now().toString(36) + randomString(6);
+  return `sha256:${Date.now().toString(36)}${randomString(6)}`;
 }
 
 /** スナップショット ID を生成（generateSnapshotHash のエイリアス） */

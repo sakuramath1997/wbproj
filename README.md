@@ -33,8 +33,8 @@ wbproj-app-p2p/
         ├── App.tsx
         ├── index.css
         ├── types/
-        │   ├── wbel.ts       # wbel v5 型定義
-        │   ├── wbelx.ts      # wbelx v1 型定義
+        │   ├── wbel.ts       # wbel v6 型定義
+        │   ├── wbelx.ts      # wbelx v2 型定義
         │   ├── wbasset.ts    # wbasset v1 型定義
         │   └── project.ts    # project.toml 型定義
         ├── utils/
@@ -77,16 +77,19 @@ npm run dev
 
 ## 今後の実装予定
 
-- [ ] P2P 同期（Yjs + WebRTC）
-- [ ] オーバーレイ操作（OA/OR/OT/OV/OS イベント）
-- [ ] アセットインポート（画像、PDF）
-- [ ] Undo/Redo
+- [x] P2P 同期（Yjs + WebRTC）
+- [x] オーバーレイ操作（OA/OR/OT/OV/OS イベント）
+- [x] アセットインポート（画像、PDF）
+- [x] Undo/Redo
 - [ ] サムネイル生成
-- [ ] 背景パターン設定
+- [ ] 背景パターン設定 UI
+- [ ] Export as PNG / SVG
+- [ ] 投げ縄（フリーフォーム選択）機能
+- [ ] ホワイトボードサイズ指定
 
 ## 仕様書
 
-- `.wbel` v5: Whiteboard Event Log
-- `.wbelx` v1: Whiteboard Extended Event Log
+- `.wbel` v6: Whiteboard Event Log
+- `.wbelx` v2: Whiteboard Extended Event Log
 - `.wbasset` v1: Whiteboard Asset Metadata
-- `.wbproj` v1: Whiteboard Project
+- `.wbproj` v3: Whiteboard Project

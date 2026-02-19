@@ -119,8 +119,8 @@ export function OverlayInlineControls({
     <div
       className="overlay-inline-controls"
       style={{ left: screenCenterX, top: screenBottom + 10 }}
-      onPointerDown={(e) => e.stopPropagation()}
-      onClick={(e) => e.stopPropagation()}
+      onPointerDown={(e: React.PointerEvent<HTMLDivElement>) => e.stopPropagation()}
+      onClick={(e: React.MouseEvent<HTMLDivElement>) => e.stopPropagation()}
     >
       {/* PDF ページ切替 */}
       {assetType === 'document' && pdfTotalPages > 1 && (

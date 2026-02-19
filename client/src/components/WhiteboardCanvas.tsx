@@ -11,6 +11,7 @@ import type {
   OverlayRemoveEvent,
   OverlayTransformEvent,
   AssetType,
+  BackgroundConfig,
 } from '../types';
 import { 
   calculateBBox, 
@@ -42,10 +43,12 @@ interface WhiteboardCanvasProps {
   overlayLockAspectRatios?: Map<string, boolean>;
   /** 再生成中の overlayId セット（スピナー表示用） */
   loadingOverlayIds?: Set<string>;
+  /** 背景設定（project.toml の [background]） */
+  backgroundConfig?: BackgroundConfig;
   onAddDrawEvent: (event: DrawEvent) => void;
   onAddEraseEvent: (event: EraseEvent, targetStrokes: DrawEvent[]) => void;
   onRemoveOverlayEvent: (event: OverlayRemoveEvent) => void;
-  onTransformOverlay: (event: OverlayTransformEvent, before: { x: number; y: number; width: number; height: number; rotation: number }) => void;
+  onTransformOverlay: (event: OverlayTransformEvent, before: Partial<{ x: number; y: number; width: number; height: number; rotation: number }>) => void;
   onSelectOverlay: (overlayId: string | null) => void;
   onDoubleClickOverlay?: (overlayId: string) => void;
   onUpdateCursor: (x: number, y: number) => void;
@@ -67,6 +70,7 @@ export function WhiteboardCanvas({
   overlayOpacityOverrides,
   overlayLockAspectRatios,
   loadingOverlayIds,
+  backgroundConfig,
   onAddDrawEvent,
   onAddEraseEvent,
   onRemoveOverlayEvent,
@@ -213,7 +217,7 @@ export function WhiteboardCanvas({
 
     // クリア
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#f8f9fa';
+    ctx.fillStyle = backgroundConfig?.color || '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     // 変換適用
@@ -222,8 +226,8 @@ export function WhiteboardCanvas({
     ctx.translate(transform.x, transform.y);
     ctx.scale(transform.scale, transform.scale);
     
-    // グリッド描画
-    drawGrid(ctx, canvas.width / dpr, canvas.height / dpr, transform);
+    // 背景パターン描画
+    drawBackground(ctx, canvas.width / dpr, canvas.height / dpr, transform, backgroundConfig);
 
     // オーバーレイ描画（ストロークより後ろ）
     for (const overlay of activeOverlays) {
@@ -590,7 +594,7 @@ export function WhiteboardCanvas({
     if (tool === 'pan' && isPanningRef.current && lastPanPointRef.current) {
       const dx = e.clientX - lastPanPointRef.current.x;
       const dy = e.clientY - lastPanPointRef.current.y;
-      setTransform(prev => ({
+      setTransform((prev: CanvasTransform) => ({
         ...prev,
         x: prev.x + dx,
         y: prev.y + dy,
@@ -903,30 +907,62 @@ function getCursor(tool: ToolType): string {
   }
 }
 
-function drawGrid(
+function drawBackground(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  transform: CanvasTransform
+  transform: CanvasTransform,
+  config?: BackgroundConfig
 ): void {
-  const gridSize = 20;
+  const pattern = config?.pattern || 'none';
+  if (pattern === 'none') return;
 
-  ctx.strokeStyle = '#e0e0e0';
-  ctx.lineWidth = 1 / transform.scale;
+  const gridSize = config?.patternSize || 20;
+  const patternColor = config?.patternColor || '#e0e0e0';
 
   const startX = Math.floor(-transform.x / transform.scale / gridSize) * gridSize;
   const startY = Math.floor(-transform.y / transform.scale / gridSize) * gridSize;
   const endX = startX + width / transform.scale + gridSize * 2;
   const endY = startY + height / transform.scale + gridSize * 2;
 
-  ctx.beginPath();
-  for (let x = startX; x < endX; x += gridSize) {
-    ctx.moveTo(x, startY);
-    ctx.lineTo(x, endY);
+  ctx.strokeStyle = patternColor;
+  ctx.fillStyle = patternColor;
+
+  switch (pattern) {
+    case 'grid': {
+      ctx.lineWidth = 1 / transform.scale;
+      ctx.beginPath();
+      for (let x = startX; x < endX; x += gridSize) {
+        ctx.moveTo(x, startY);
+        ctx.lineTo(x, endY);
+      }
+      for (let y = startY; y < endY; y += gridSize) {
+        ctx.moveTo(startX, y);
+        ctx.lineTo(endX, y);
+      }
+      ctx.stroke();
+      break;
+    }
+    case 'dots': {
+      const radius = Math.max(1 / transform.scale, 0.8);
+      for (let x = startX; x < endX; x += gridSize) {
+        for (let y = startY; y < endY; y += gridSize) {
+          ctx.beginPath();
+          ctx.arc(x, y, radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      break;
+    }
+    case 'lines': {
+      ctx.lineWidth = 1 / transform.scale;
+      ctx.beginPath();
+      for (let y = startY; y < endY; y += gridSize) {
+        ctx.moveTo(startX, y);
+        ctx.lineTo(endX, y);
+      }
+      ctx.stroke();
+      break;
+    }
   }
-  for (let y = startY; y < endY; y += gridSize) {
-    ctx.moveTo(startX, y);
-    ctx.lineTo(endX, y);
-  }
-  ctx.stroke();
 }

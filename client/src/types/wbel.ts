@@ -1,5 +1,5 @@
 /**
- * Whiteboard Event Log (.wbel) v5 型定義
+ * Whiteboard Event Log (.wbel) v6 型定義
  */
 
 // ========================================

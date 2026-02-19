@@ -1,7 +1,7 @@
 /**
- * Whiteboard Extended Event Log (.wbelx) v1 型定義
- * 
- * .wbel v5 のスーパーセット。オーバーレイ操作を追加。
+ * Whiteboard Extended Event Log (.wbelx) v2 型定義
+ *
+ * .wbel v6 のスーパーセット。オーバーレイ操作を追加。
  */
 
 import type { DrawEvent, EraseEvent, SnapshotMarkerEvent, StrokeOperation } from './wbel';
@@ -13,23 +13,12 @@ export * from './wbel';
 // Viewport 型
 // ========================================
 
-/** 表示領域（SVG viewBox と同じ順序: min-x, min-y, width, height） */
+/** 表示領域 */
 export interface Viewport {
   x: number;
   y: number;
   width: number;
   height: number;
-}
-
-/** Viewport を文字列に変換 (x;y;w;h) */
-export function viewportToString(vp: Viewport): string {
-  return `${vp.x};${vp.y};${vp.width};${vp.height}`;
-}
-
-/** 文字列から Viewport をパース */
-export function parseViewport(str: string): Viewport {
-  const [x, y, width, height] = str.split(';').map(Number);
-  return { x, y, width, height };
 }
 
 // ========================================
@@ -41,17 +30,17 @@ export interface OverlayAddEvent {
   type: 'OA';
   timestamp: string;
   sessionId: string;
-  overlayId: string;        // o:xxx
-  assetUuid: string;        // 参照先アセットの UUID
+  overlayId: string;
+  assetUuid: string;
   x: number;
   y: number;
   width: number;
   height: number;
-  rotation: number;         // 度、時計回り
+  rotation: number;
   viewport: Viewport;
-  page: number;             // PDF ページ（1-indexed、非PDF は 0）
+  page: number;
   zIndex: number;
-  opacity: number;          // 0.0-1.0
+  opacity: number;
 }
 
 /** Overlay Remove イベント */
@@ -59,41 +48,58 @@ export interface OverlayRemoveEvent {
   type: 'OR';
   timestamp: string;
   sessionId: string;
-  removeId: string;         // r:xxx
+  removeId: string;
   targetOverlayIds: string[];
 }
 
-/** Overlay Transform イベント（移動・リサイズ・回転） */
+/**
+ * Overlay Transform イベント（移動・リサイズ・回転）
+ * 差分記録方式: 変更されたフィールドのみを含める。
+ * x, y, width, height, rotation のうち少なくとも1つは必須。
+ */
 export interface OverlayTransformEvent {
   type: 'OT';
   timestamp: string;
   sessionId: string;
   overlayId: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  rotation: number;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  rotation?: number;
 }
 
-/** Overlay Viewport イベント（表示領域・ページ変更） */
+/**
+ * Overlay Viewport イベント（表示領域・ページ変更）
+ * 差分記録方式: 変更されたフィールドのみを含める。
+ * viewport, page のうち少なくとも1つは必須。
+ */
 export interface OverlayViewportEvent {
   type: 'OV';
   timestamp: string;
   sessionId: string;
   overlayId: string;
-  viewport: Viewport;
-  page: number;
+  viewport?: Viewport;
+  page?: number;
 }
 
-/** Overlay Style イベント（z_index・opacity 変更） */
+/** OS イベントの個別ターゲット */
+export interface OverlayStyleTarget {
+  overlayId: string;
+  zIndex?: number;
+  opacity?: number;
+}
+
+/**
+ * Overlay Style イベント（zIndex・opacity 変更）
+ * 複数オーバーレイを1イベントで変更できる。
+ * 差分記録方式: 各ターゲットで変更されたフィールドのみを含める。
+ */
 export interface OverlayStyleEvent {
   type: 'OS';
   timestamp: string;
   sessionId: string;
-  overlayId: string;
-  zIndex: number;
-  opacity: number;
+  targets: OverlayStyleTarget[];
 }
 
 /** オーバーレイイベント（統合型） */
@@ -146,31 +152,42 @@ export interface OverlayRemoveOperation {
   type: 'overlayRemove';
   removeId: string;
   targetOverlayIds: string[];
-  targetOverlays: OverlayAddEvent[];  // Undo 用
+  targetOverlays: OverlayAddEvent[];
 }
 
-/** Overlay Transform 操作記録 */
+/**
+ * Overlay Transform 操作記録
+ * before/after は変更されたフィールドのみを保持する（差分）
+ */
 export interface OverlayTransformOperation {
   type: 'overlayTransform';
   overlayId: string;
-  before: { x: number; y: number; width: number; height: number; rotation: number };
-  after: { x: number; y: number; width: number; height: number; rotation: number };
+  before: Partial<{ x: number; y: number; width: number; height: number; rotation: number }>;
+  after: Partial<{ x: number; y: number; width: number; height: number; rotation: number }>;
 }
 
-/** Overlay Viewport 操作記録 */
+/**
+ * Overlay Viewport 操作記録
+ * before/after は変更されたフィールドのみを保持する（差分）
+ */
 export interface OverlayViewportOperation {
   type: 'overlayViewport';
   overlayId: string;
-  before: { viewport: Viewport; page: number };
-  after: { viewport: Viewport; page: number };
+  before: Partial<{ viewport: Viewport; page: number }>;
+  after: Partial<{ viewport: Viewport; page: number }>;
 }
 
-/** Overlay Style 操作記録 */
+/**
+ * Overlay Style 操作記録
+ * OS が複数ターゲット対応になったため、変更リストとして保持する
+ */
 export interface OverlayStyleOperation {
   type: 'overlayStyle';
-  overlayId: string;
-  before: { zIndex: number; opacity: number };
-  after: { zIndex: number; opacity: number };
+  changes: Array<{
+    overlayId: string;
+    before: Partial<{ zIndex: number; opacity: number }>;
+    after: Partial<{ zIndex: number; opacity: number }>;
+  }>;
 }
 
 /** オーバーレイ操作記録（統合型） */
@@ -193,7 +210,7 @@ export interface WbelxState {
   // ストローク
   activeStrokeIds: Set<string>;
   strokes: Map<string, DrawEvent>;
-  
+
   // オーバーレイ
   activeOverlayIds: Set<string>;
   overlays: Map<string, OverlayState>;

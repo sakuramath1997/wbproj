@@ -119,7 +119,7 @@ export function ProjectDashboard() {
             type="text"
             className="dashboard-title-input"
             value={editingTitle}
-            onChange={(e) => setEditingTitle(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditingTitle(e.target.value)}
             onBlur={handleTitleSave}
             onKeyDown={handleTitleKeyDown}
             autoFocus
@@ -297,7 +297,7 @@ function BoardsTab({
         <span className="boards-toolbar-label">Sort by:</span>
         <select 
           value={sortKey} 
-          onChange={(e) => onSortChange(e.target.value as BoardSortKey)}
+          onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onSortChange(e.target.value as BoardSortKey)}
           className="boards-sort-select"
         >
           <option value="displayOrder">Display Order</option>
@@ -319,12 +319,12 @@ function BoardsTab({
             key={board.id}
             className={`board-card ${dragOverId === board.id ? 'drag-over' : ''} ${draggedId === board.id ? 'dragging' : ''}`}
             draggable={isDraggable}
-            onDragStart={(e) => handleDragStart(e, board.id)}
+            onDragStart={(e: React.DragEvent<HTMLDivElement>) => handleDragStart(e, board.id)}
             onDragEnd={handleDragEnd}
-            onDragEnter={(e) => handleDragEnter(e, board.id)}
+            onDragEnter={(e: React.DragEvent<HTMLDivElement>) => handleDragEnter(e, board.id)}
             onDragLeave={handleDragLeave}
             onDragOver={handleDragOver}
-            onDrop={(e) => handleDrop(e, board.id)}
+            onDrop={(e: React.DragEvent<HTMLDivElement>) => handleDrop(e, board.id)}
             onClick={() => !draggedId && !menuOpenId && onBoardClick(board.id)}
           >
             {isDraggable && (
@@ -332,15 +332,13 @@ function BoardsTab({
             )}
             <button 
               className="board-menu-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                setMenuOpenId(menuOpenId === board.id ? null : board.id);
+              onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
               }}
             >
               ⋯
             </button>
             {menuOpenId === board.id && (
-              <div className="board-menu" onClick={(e) => e.stopPropagation()}>
+              <div className="board-menu" onClick={(e: React.MouseEvent<HTMLDivElement>) => e.stopPropagation()}>
                 <button 
                   className="board-menu-item"
                   onClick={() => {
@@ -481,7 +479,7 @@ function AssetsTab() {
         </div>
       ) : (
         <div className="asset-grid">
-          {assets.map((asset) => (
+          {assets.map((asset: ImportedAsset) => (
             <div key={asset.uuid} className="asset-card">
               <div className="asset-thumbnail">
                 {asset.type === 'image' && thumbnails.has(asset.uuid) ? (

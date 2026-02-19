@@ -8,19 +8,20 @@ import type {
   ProjectConfig,
   ProjectInfo,
   BackgroundConfig,
+  RenderingConfig,
   CollaborationConfig,
   BoardInfo,
   ImportedAssetInfo,
   BackgroundPattern,
 } from '../types';
-import { DEFAULT_BACKGROUND } from '../types';
+import { DEFAULT_BACKGROUND, DEFAULT_RENDERING } from '../types';
 
 // ========================================
 // TOML パース（簡易実装）
 // ========================================
 
 interface TomlSection {
-  [key: string]: string | number | boolean | string[];
+  [key: string]: string | number | boolean | string[] | Record<string, unknown>;
 }
 
 interface TomlDocument {
@@ -59,8 +60,8 @@ function parseToml(content: string): TomlDocument {
       continue;
     }
 
-    // キー = 値
-    const kvMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+)$/);
+    // キー = 値（ハイフン・ドットを含むキーにも対応）
+    const kvMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*(.+)$/);
     if (kvMatch && currentSection) {
       const key = kvMatch[1];
       const rawValue = kvMatch[2];
@@ -71,8 +72,24 @@ function parseToml(content: string): TomlDocument {
   return result;
 }
 
-function parseTomlValue(raw: string): string | number | boolean | string[] {
+function parseTomlValue(raw: string): string | number | boolean | string[] | Record<string, unknown> {
   const trimmed = raw.trim();
+
+  // インラインテーブル: { key = value, key = value, ... }
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    const inner = trimmed.slice(1, -1).trim();
+    if (!inner) return {};
+    const result: Record<string, unknown> = {};
+    // key = value ペアをカンマで分割（文字列内カンマは非考慮、簡易実装）
+    const pairs = inner.split(',');
+    for (const pair of pairs) {
+      const m = pair.trim().match(/^([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*(.+)$/);
+      if (m) {
+        result[m[1]] = parseTomlValue(m[2]);
+      }
+    }
+    return result;
+  }
 
   // 配列
   if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
@@ -131,6 +148,22 @@ export function parseProjectToml(content: string): ProjectConfig {
     patternColor: String(bgSection['pattern_color'] || DEFAULT_BACKGROUND.patternColor),
   };
 
+  // [rendering]
+  const renderingSection = doc['rendering'] || {};
+  const fvRaw = renderingSection['board_overlay_fallback_viewport'];
+  const fvObj = (typeof fvRaw === 'object' && fvRaw !== null && !Array.isArray(fvRaw))
+    ? fvRaw as Record<string, unknown>
+    : {};
+  const rendering: RenderingConfig = {
+    boardOverlayMargin: Number(renderingSection['board_overlay_margin'] ?? DEFAULT_RENDERING.boardOverlayMargin),
+    boardOverlayFallbackViewport: {
+      x:      Number(fvObj['x']      ?? DEFAULT_RENDERING.boardOverlayFallbackViewport.x),
+      y:      Number(fvObj['y']      ?? DEFAULT_RENDERING.boardOverlayFallbackViewport.y),
+      width:  Number(fvObj['width']  ?? DEFAULT_RENDERING.boardOverlayFallbackViewport.width),
+      height: Number(fvObj['height'] ?? DEFAULT_RENDERING.boardOverlayFallbackViewport.height),
+    },
+  };
+
   // [collaboration]
   const collabSection = doc['collaboration'] || {};
   const collaboration: CollaborationConfig = {
@@ -181,6 +214,7 @@ export function parseProjectToml(content: string): ProjectConfig {
   return {
     project,
     background,
+    rendering,
     collaboration,
     boards,
     assets,

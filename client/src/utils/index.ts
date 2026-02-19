@@ -16,7 +16,6 @@ export * from './toml-parser';
 
 // プロジェクト管理
 export * from './project';
-export type { Project } from './project';
 
 // 曲線フィッティング（名前衝突を避けるため個別エクスポート）
 export {

@@ -19,6 +19,7 @@ import {
   saveAssetIndex,
   loadAssetIndex,
   saveAssetFile,
+  loadAssetFile,
   loadAssetFileAsDataUrl,
   deleteAssetFile,
   saveBoardEvents,
@@ -98,7 +99,7 @@ interface ProjectState {
 // Zustand ストア
 // ========================================
 
-export const useProjectStore = create<ProjectState>((set, get) => ({
+export const useProjectStore = create<ProjectState>((set: (partial: Partial<ProjectState>) => void, get: () => ProjectState) => ({
   project: null,
   isLoading: false,
   isInitialized: false,
@@ -140,6 +141,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           config,
           boards,
           assetIndex,
+          assetFiles: new Map(), // IndexedDB に保存済み、必要時にロード
         };
         
         set({ 
@@ -209,6 +211,17 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         await saveBoardEvents(boardId, events);
       }
       
+      // アセットファイル（画像・PDF等）を保存
+      for (const [uuid, file] of project.assetFiles) {
+        await saveAssetFile({
+          uuid,
+          fileName: file.fileName,
+          mimeType: file.mimeType,
+          data: file.data,
+          size: file.data.byteLength,
+        });
+      }
+      
       // boardUuids を assetIndex から派生
       const boardUuids = new Map<string, string>();
       for (const [, asset] of project.assetIndex.byUuid) {
@@ -235,6 +248,20 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!project) return null;
     
     try {
+      // エクスポート用にアセットファイルを IndexedDB からロード
+      for (const [uuid, asset] of project.assetIndex.byUuid) {
+        if (asset.type !== 'board' && !project.assetFiles.has(uuid)) {
+          const stored = await loadAssetFile(uuid);
+          if (stored) {
+            project.assetFiles.set(uuid, {
+              data: stored.data,
+              mimeType: stored.mimeType,
+              fileName: stored.fileName,
+            });
+          }
+        }
+      }
+      
       const blob = await saveProject(project);
       return blob;
     } catch (error) {
