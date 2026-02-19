@@ -32,6 +32,8 @@ export interface ViewportEditorPdfProps {
   onViewportChange: (vp: Viewport) => void;
   onPageChange: (page: number) => void;
   onAspectRatioDetected?: (ar: number) => void;
+  /** ページの描画サイズを通知（trim 後の overlay 位置計算に使用） */
+  onNaturalSizeDetected?: (w: number, h: number) => void;
 }
 
 // ----------------------------------------------------------------
@@ -45,6 +47,7 @@ export function ViewportEditorPdf({
   onViewportChange,
   onPageChange,
   onAspectRatioDetected,
+  onNaturalSizeDetected,
 }: ViewportEditorPdfProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -184,6 +187,7 @@ export function ViewportEditorPdf({
       setPageImage(img);
       setIsLoadingPage(false);
       onAspectRatioDetected?.(img.width / img.height);
+      onNaturalSizeDetected?.(img.width, img.height);
       applyInitialFit();
     }).catch((err) => {
       console.error('Failed to render page:', err);

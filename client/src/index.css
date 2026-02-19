@@ -1604,3 +1604,124 @@ body {
   text-align: center;
 }
 
+/* ============================================================
+   Viewport Editor
+   Overlay Inline Controls
+   canvas-container の上に absolute 配置されるフローティングUI
+============================================================ */
+
+.overlay-inline-controls {
+  position: absolute;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg-primary, #fff);
+  border: 1px solid var(--border-light, #e5e7eb);
+  border-radius: 8px;
+  padding: 4px 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  z-index: 500;
+  pointer-events: auto;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.overlay-inline-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.overlay-inline-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border-light, #e5e7eb);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+.overlay-inline-btn {
+  background: none;
+  border: none;
+  padding: 4px 7px;
+  cursor: pointer;
+  font-size: 13px;
+  border-radius: 4px;
+  color: var(--text-primary, #111);
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: background 0.1s;
+}
+
+.overlay-inline-btn:hover:not(:disabled) {
+  background: var(--bg-secondary, #f3f4f6);
+}
+
+.overlay-inline-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.overlay-inline-btn--editor {
+  font-size: 12px;
+  color: var(--accent-primary, #3b82f6);
+}
+
+.overlay-inline-btn--editor:hover {
+  background: var(--accent-light, #eff6ff);
+}
+
+.overlay-inline-btn--delete {
+  color: #ef4444;
+}
+
+.overlay-inline-btn--delete:hover {
+  background: #fef2f2;
+}
+
+.overlay-inline-label {
+  font-size: 11px;
+  color: var(--text-secondary, #6b7280);
+  margin-right: 2px;
+}
+
+.overlay-inline-slider {
+  width: 80px;
+  cursor: pointer;
+  accent-color: var(--accent-primary, #3b82f6);
+}
+
+.overlay-inline-value {
+  font-size: 11px;
+  color: var(--text-secondary, #6b7280);
+  min-width: 28px;
+  text-align: right;
+}
+
+.overlay-inline-page {
+  font-size: 12px;
+  min-width: 40px;
+  text-align: center;
+  color: var(--text-primary, #111);
+}
+
+/* ViewportEditor: AR ロックチェックボックス */
+.viewport-editor-lock-ar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-primary, #111);
+  cursor: pointer;
+  user-select: none;
+}
+
+.viewport-editor-lock-ar input[type="checkbox"] {
+  cursor: pointer;
+  accent-color: var(--accent-primary, #3b82f6);
+  width: 14px;
+  height: 14px;
+}

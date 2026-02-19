@@ -1,112 +1,222 @@
 /**
- * オーバーレイのインラインコントロール
- * 
- * 選択中のオーバーレイの下に表示される操作パネル
+ * OverlayInlineControls
+ *
+ * 選択中のオーバーレイの下端中央に表示されるフローティングコントロール。
+ * canvas 上ではなく canvas-container の上に DOM として absolute 配置する。
+ *
+ * タイプ別表示:
+ *   image    : 透明度 / ViewportEditor（トリミング）/ 削除
+ *   document : ページ切替 / 透明度 / ViewportEditor（トリミング）/ 削除
+ *   board    : 透明度 / ViewportEditor（表示領域）/ 削除
  */
 
-import { useCallback } from 'react';
-import type { OverlayState, AssetType } from '../types';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import type { OverlayState, AssetType, CanvasTransform } from '../types';
 
-interface OverlayInlineControlsProps {
+// ----------------------------------------------------------------
+// Props
+// ----------------------------------------------------------------
+
+export interface OverlayInlineControlsProps {
   overlay: OverlayState;
   assetType: AssetType;
-  currentPage?: number;
-  totalPages?: number;
-  position: { x: number; y: number };
-  scale: number;
-  onPageChange?: (page: number) => void;
-  onOpenEditor: () => void;
+  canvasTransform: CanvasTransform;
+
+  // PDF 専用
+  pdfTotalPages: number;
+
+  // z-order
+  canBringForward: boolean;
+  canSendBackward: boolean;
+  onBringToFront: () => void;
+  onBringForward: () => void;
+  onSendBackward: () => void;
+  onSendToBack: () => void;
+
+  // コールバック
+  onPageChange: (page: number) => void;
+  /** スライダードラッグ中に呼ばれる（リアルタイムプレビュー用）*/
+  onOpacityPreview: (opacity: number) => void;
+  /** スライダーを離したときに呼ばれる。Undo スタックに乗る。 */
+  onOpacityCommit: (opacity: number) => void;
+  onOpenViewportEditor: () => void;
+  onDelete: () => void;
 }
+
+// ----------------------------------------------------------------
+// コンポーネント
+// ----------------------------------------------------------------
 
 export function OverlayInlineControls({
   overlay,
   assetType,
-  currentPage = 1,
-  totalPages = 1,
-  position,
-  scale,
+  canvasTransform,
+  pdfTotalPages,
+  canBringForward,
+  canSendBackward,
+  onBringToFront,
+  onBringForward,
+  onSendBackward,
+  onSendToBack,
   onPageChange,
-  onOpenEditor,
+  onOpacityPreview,
+  onOpacityCommit,
+  onOpenViewportEditor,
+  onDelete,
 }: OverlayInlineControlsProps) {
-  const handlePrevPage = useCallback(() => {
-    if (currentPage > 1 && onPageChange) {
-      onPageChange(currentPage - 1);
-    }
-  }, [currentPage, onPageChange]);
+  // opacity はドラッグ中だけローカル state でプレビュー
+  const [localOpacity, setLocalOpacity] = useState(overlay.opacity);
+  const opacityBeforeRef = useRef(overlay.opacity);
 
-  const handleNextPage = useCallback(() => {
-    if (currentPage < totalPages && onPageChange) {
-      onPageChange(currentPage + 1);
-    }
-  }, [currentPage, totalPages, onPageChange]);
+  // overlay.opacity が外から変わったとき（Undo/Redo）に同期
+  useEffect(() => {
+    setLocalOpacity(overlay.opacity);
+  }, [overlay.opacity]);
 
-  // コントロールのスタイル（キャンバスの変換に合わせてスケール）
-  const controlStyle: React.CSSProperties = {
-    position: 'absolute',
-    left: position.x,
-    top: position.y + overlay.height * scale + 8,
-    transform: 'translateX(-50%)',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    background: 'rgba(255, 255, 255, 0.95)',
-    borderRadius: '6px',
-    padding: '4px 8px',
-    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.15)',
-    zIndex: 1000,
-    pointerEvents: 'auto',
-  };
+  // ----------------------------------------------------------------
+  // スクリーン座標の計算（canvasTransform からオーバーレイ下端中央を算出）
+  // ----------------------------------------------------------------
+  const t = canvasTransform;
+  const screenCenterX = overlay.x * t.scale + t.x + (overlay.width  * t.scale) / 2;
+  const screenBottom  = overlay.y * t.scale + t.y +  overlay.height * t.scale;
 
-  const buttonStyle: React.CSSProperties = {
-    background: 'none',
-    border: 'none',
-    padding: '4px 8px',
-    cursor: 'pointer',
-    fontSize: '14px',
-    borderRadius: '4px',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  };
+  // ----------------------------------------------------------------
+  // ハンドラ
+  // ----------------------------------------------------------------
 
-  const disabledButtonStyle: React.CSSProperties = {
-    ...buttonStyle,
-    opacity: 0.3,
-    cursor: 'not-allowed',
-  };
+  const handleOpacityMouseDown = useCallback(() => {
+    opacityBeforeRef.current = overlay.opacity;
+  }, [overlay.opacity]);
 
+  const handleOpacityChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = Number(e.target.value) / 100;
+    setLocalOpacity(v);
+    onOpacityPreview(v);
+  }, [onOpacityPreview]);
+
+  const handleOpacityCommit = useCallback(() => {
+    onOpacityCommit(localOpacity);
+  }, [localOpacity, onOpacityCommit]);
+
+  const handlePagePrev = useCallback(() => {
+    if (overlay.page > 1) onPageChange(overlay.page - 1);
+  }, [overlay.page, onPageChange]);
+
+  const handlePageNext = useCallback(() => {
+    if (overlay.page < pdfTotalPages) onPageChange(overlay.page + 1);
+  }, [overlay.page, pdfTotalPages, onPageChange]);
+
+  // ----------------------------------------------------------------
+  // ラベル
+  // ----------------------------------------------------------------
+  const editorLabel =
+    assetType === 'board' ? '表示領域…' : 'トリミング…';
+
+  // ----------------------------------------------------------------
+  // レンダリング
+  // ----------------------------------------------------------------
   return (
-    <div style={controlStyle} onClick={(e) => e.stopPropagation()}>
-      {assetType === 'document' && totalPages > 1 && (
+    <div
+      className="overlay-inline-controls"
+      style={{ left: screenCenterX, top: screenBottom + 10 }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {/* PDF ページ切替 */}
+      {assetType === 'document' && pdfTotalPages > 1 && (
         <>
-          <button
-            style={currentPage <= 1 ? disabledButtonStyle : buttonStyle}
-            onClick={handlePrevPage}
-            disabled={currentPage <= 1}
-            title="Previous page"
-          >
-            ◀
-          </button>
-          <span style={{ fontSize: '12px', minWidth: '50px', textAlign: 'center' }}>
-            {currentPage} / {totalPages}
-          </span>
-          <button
-            style={currentPage >= totalPages ? disabledButtonStyle : buttonStyle}
-            onClick={handleNextPage}
-            disabled={currentPage >= totalPages}
-            title="Next page"
-          >
-            ▶
-          </button>
-          <div style={{ width: '1px', height: '16px', background: '#ddd', margin: '0 4px' }} />
+          <div className="overlay-inline-group">
+            <button
+              className="overlay-inline-btn"
+              onClick={handlePagePrev}
+              disabled={overlay.page <= 1}
+              title="前のページ"
+            >◀</button>
+            <span className="overlay-inline-page">
+              {overlay.page} / {pdfTotalPages}
+            </span>
+            <button
+              className="overlay-inline-btn"
+              onClick={handlePageNext}
+              disabled={overlay.page >= pdfTotalPages}
+              title="次のページ"
+            >▶</button>
+          </div>
+          <div className="overlay-inline-divider" />
         </>
       )}
+
+      {/* 透明度 */}
+      <div className="overlay-inline-group">
+        <span className="overlay-inline-label">不透明度</span>
+        <input
+          type="range"
+          className="overlay-inline-slider"
+          min={0}
+          max={100}
+          step={1}
+          value={Math.round(localOpacity * 100)}
+          onMouseDown={handleOpacityMouseDown}
+          onChange={handleOpacityChange}
+          onMouseUp={handleOpacityCommit}
+          onTouchEnd={handleOpacityCommit}
+          title={`${Math.round(localOpacity * 100)}%`}
+        />
+        <span className="overlay-inline-value">
+          {Math.round(localOpacity * 100)}%
+        </span>
+      </div>
+
+      <div className="overlay-inline-divider" />
+
+      {/* ViewportEditor を開く */}
       <button
-        style={buttonStyle}
-        onClick={onOpenEditor}
-        title="Edit viewport"
+        className="overlay-inline-btn overlay-inline-btn--editor"
+        onClick={onOpenViewportEditor}
+        title={editorLabel}
       >
-        🔍
+        {assetType === 'board' ? '🗂' : '✂️'} {editorLabel}
+      </button>
+
+      <div className="overlay-inline-divider" />
+
+      {/* z-order */}
+      <div className="overlay-inline-group">
+        <button
+          className="overlay-inline-btn"
+          onClick={onBringToFront}
+          disabled={!canBringForward}
+          title="最前面へ"
+        >⤒</button>
+        <button
+          className="overlay-inline-btn"
+          onClick={onBringForward}
+          disabled={!canBringForward}
+          title="前へ"
+        >↑</button>
+        <button
+          className="overlay-inline-btn"
+          onClick={onSendBackward}
+          disabled={!canSendBackward}
+          title="後ろへ"
+        >↓</button>
+        <button
+          className="overlay-inline-btn"
+          onClick={onSendToBack}
+          disabled={!canSendBackward}
+          title="最背面へ"
+        >⤓</button>
+      </div>
+
+      <div className="overlay-inline-divider" />
+
+      {/* 削除 */}
+      <button
+        className="overlay-inline-btn overlay-inline-btn--delete"
+        onClick={onDelete}
+        title="削除 (Delete キー)"
+      >
+        🗑
       </button>
     </div>
   );

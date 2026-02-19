@@ -16,6 +16,7 @@ import type {
   OverlayRemoveEvent,
   OverlayTransformEvent,
   OverlayViewportEvent,
+  OverlayStyleEvent,
   OverlayState,
   Operation,
 } from '../types';
@@ -71,6 +72,7 @@ export interface UseYjsReturn {
   removeOverlayEvent: (event: OverlayRemoveEvent, targetOverlays: OverlayAddEvent[]) => void;
   transformOverlayEvent: (event: OverlayTransformEvent, before: { x: number; y: number; width: number; height: number; rotation: number }) => void;
   viewportOverlayEvent: (event: OverlayViewportEvent, before: { viewport: { x: number; y: number; width: number; height: number }; page: number }) => void;
+  styleOverlayEvent: (event: OverlayStyleEvent, before: { zIndex: number; opacity: number }) => void;
   performUndo: () => void;
   performRedo: () => void;
   canUndo: boolean;
@@ -505,6 +507,23 @@ export function useYjs({
     setRedoStack([]);
   }, []);
 
+  // オーバーレイ style 変更（opacity / zIndex）
+  const styleOverlayEvent = useCallback((
+    event: OverlayStyleEvent,
+    before: { zIndex: number; opacity: number }
+  ) => {
+    if (!yEventsRef.current) return;
+    const e = { ...event, sessionId: event.sessionId || sessionIdRef.current };
+    yEventsRef.current.push([e]);
+    setUndoStack(prev => [...prev, {
+      type: 'overlayStyle',
+      overlayId: e.overlayId,
+      before,
+      after: { zIndex: e.zIndex, opacity: e.opacity },
+    }]);
+    setRedoStack([]);
+  }, []);
+
   // Undo/Redo
   const performUndo = useCallback(() => {
     if (undoStack.length === 0 || !yEventsRef.current) return;
@@ -559,6 +578,15 @@ export function useYjs({
         viewport: op.before.viewport,
         page: op.before.page,
       }]);
+    } else if (op.type === 'overlayStyle') {
+      yEventsRef.current.push([{
+        type: 'OS',
+        timestamp: getTimestamp(),
+        sessionId: sessionIdRef.current,
+        overlayId: op.overlayId,
+        zIndex: op.before.zIndex,
+        opacity: op.before.opacity,
+      }]);
     }
     
     setUndoStack(prev => prev.slice(0, -1));
@@ -611,6 +639,15 @@ export function useYjs({
         overlayId: op.overlayId,
         viewport: op.after.viewport,
         page: op.after.page,
+      }]);
+    } else if (op.type === 'overlayStyle') {
+      yEventsRef.current.push([{
+        type: 'OS',
+        timestamp: getTimestamp(),
+        sessionId: sessionIdRef.current,
+        overlayId: op.overlayId,
+        zIndex: op.after.zIndex,
+        opacity: op.after.opacity,
       }]);
     }
     
@@ -689,6 +726,7 @@ export function useYjs({
     removeOverlayEvent,
     transformOverlayEvent,
     viewportOverlayEvent,
+    styleOverlayEvent,
     performUndo,
     performRedo,
     canUndo: undoStack.length > 0,

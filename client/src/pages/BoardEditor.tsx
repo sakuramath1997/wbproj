@@ -4,7 +4,7 @@ import { useProjectStore } from '../hooks/useProjectStore';
 import { useYjs } from '../hooks/useYjs';
 import { WhiteboardCanvas } from '../components/WhiteboardCanvas';
 import { Toolbar } from '../components/Toolbar';
-// import { OverlayInlineControls } from '../components/OverlayInlineControls';  // 後で統合
+import { OverlayInlineControls } from '../components/OverlayInlineControls';
 import { ViewportEditor } from '../components/ViewportEditor';
 import type { 
   ToolType, 
@@ -15,6 +15,7 @@ import type {
   OverlayRemoveEvent,
   OverlayTransformEvent,
   OverlayViewportEvent,
+  OverlayStyleEvent,
   AssetType,
   CanvasTransform,
 } from '../types';
@@ -65,10 +66,22 @@ export function BoardEditor() {
   // overlayId ごとの「最後にレンダリングしたキー」を管理（変更検知用）
   const overlayRenderKeyRef = useRef<Map<string, string>>(new Map());
   // WhiteboardCanvas の現在の transform（ズームレベル変化でボードサムネイルを再生成する）
+  // インラインコントロール用
+  const [overlayOpacityOverrides, setOverlayOpacityOverrides] = useState<Map<string, number>>(new Map());
+  /** overlayId → AR ロック設定（デフォルト true）。ViewportEditor の適用で更新。 */
+  const [overlayLockAspectRatios, setOverlayLockAspectRatios] = useState<Map<string, boolean>>(new Map());
+  /** 画像再生成中の overlayId セット（スピナー表示用） */
+  const [loadingOverlayIds, setLoadingOverlayIds] = useState<Set<string>>(new Set());
+  // インラインコントロールの位置計算用：transform をリアルタイムで反映（パン・ズーム追随）
+  const [canvasTransformFull, setCanvasTransformFull] = useState<CanvasTransform>({ x: 0, y: 0, scale: 1 });
+  // サムネイル再生成用：ズームティア変化時のみ更新
   const [canvasTransform, setCanvasTransform] = useState<CanvasTransform>({ x: 0, y: 0, scale: 1 });
-  // ズームティアが変化したときのみ canvasTransform を更新（毎フレーム更新を防ぐ）
+  // ズームティアが変化したときのみ canvasTransform を更新（サムネイル再生成をスロットリング）
   const lastZoomTierRef = useRef(0);
   const handleTransformChange = useCallback((t: CanvasTransform) => {
+    // インラインコントロール用は常時更新
+    setCanvasTransformFull(t);
+    // サムネイル再生成はズームティア変化時のみ
     const newTier = Math.ceil(Math.log2(Math.max(t.scale, 0.01)));
     if (newTier !== lastZoomTierRef.current) {
       lastZoomTierRef.current = newTier;
@@ -165,6 +178,7 @@ export function BoardEditor() {
     removeOverlayEvent,
     transformOverlayEvent,
     viewportOverlayEvent,
+    styleOverlayEvent,
     performUndo,
     performRedo,
     canUndo,
@@ -488,6 +502,17 @@ export function BoardEditor() {
       for (const uuid of missingUuids) requestAsset(uuid);
 
       setOverlayImages(newImages);
+      // 再生成が完了した overlayId を loading から除外
+      if (missingUuids.length === 0) {
+        setLoadingOverlayIds(prev => {
+          if (prev.size === 0) return prev;
+          const next = new Set<string>(prev);
+          for (const id of next) {
+            if (newImages.has(id)) next.delete(id);
+          }
+          return next.size === prev.size ? prev : next;
+        });
+      }
     };
 
     loadImages();
@@ -559,35 +584,85 @@ export function BoardEditor() {
     // アセットタイプを取得
     const asset = project?.assetIndex.byUuid.get(assetUuid);
     const assetType = asset?.type || 'image';
-    
-    let width = 300;
-    let height = 200;
-    
-    // PDF の場合はアスペクト比を取得
+
+    // デフォルト配置: 幅 300, 重心 (250, 200)
+    const DEFAULT_W = 300;
+    const DEFAULT_H = 200;
+    const DEFAULT_CX = 250;
+    const DEFAULT_CY = 200;
+    const DEFAULT_AREA = DEFAULT_W * DEFAULT_H; // 60000
+
+    let width = DEFAULT_W;
+    let height = DEFAULT_H;
+
     if (assetType === 'document') {
+      // PDF: 1ページ目のアスペクト比を取得
       try {
         const dataUrl = await loadAssetFileAsDataUrl(assetUuid);
         if (dataUrl) {
           const pdfDoc = await loadPdfDocument(dataUrl);
           const page = await pdfDoc.getPage(1);
-          const viewport = page.getViewport({ scale: 1 });
-          // アスペクト比を維持して幅 300 に設定
-          width = 300;
-          height = Math.round(300 * (viewport.height / viewport.width));
+          const vp = page.getViewport({ scale: 1 });
+          const ar = vp.width / vp.height;
+          width  = Math.round(Math.sqrt(DEFAULT_AREA * ar));
+          height = Math.round(Math.sqrt(DEFAULT_AREA / ar));
         }
       } catch (error) {
         console.warn('Failed to get PDF dimensions:', error);
       }
+
+    } else if (assetType === 'board') {
+      // ボード: コンテンツ BBox からアスペクト比を決定
+      try {
+        const boards = getBoards();
+        let boardId: string | null = null;
+        for (const board of boards) {
+          if (getBoardUuid(board.id) === assetUuid) { boardId = board.id; break; }
+        }
+        if (boardId) {
+          const snap = await loadBoardSnapshot(boardId);
+          const events = snap?.length ? snap : await loadBoardEventsAsync(boardId);
+          const state = computeState(events);
+          const boardStrokes = getActiveStrokes(state);
+          const boardOverlays = getActiveOverlays(state);
+
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          for (const s of boardStrokes) {
+            if (s.bbox) {
+              minX = Math.min(minX, s.bbox[0]); minY = Math.min(minY, s.bbox[1]);
+              maxX = Math.max(maxX, s.bbox[2]); maxY = Math.max(maxY, s.bbox[3]);
+            }
+          }
+          for (const o of boardOverlays) {
+            minX = Math.min(minX, o.x); minY = Math.min(minY, o.y);
+            maxX = Math.max(maxX, o.x + o.width); maxY = Math.max(maxY, o.y + o.height);
+          }
+
+          if (minX !== Infinity) {
+            const contentW = Math.max(maxX - minX, 1);
+            const contentH = Math.max(maxY - minY, 1);
+            const ar = contentW / contentH;
+            width  = Math.round(Math.sqrt(DEFAULT_AREA * ar));
+            height = Math.round(Math.sqrt(DEFAULT_AREA / ar));
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to get board dimensions:', error);
+      }
     }
-    
+
+    // 等積・重心同一になるよう配置座標を決定
+    const x = Math.round(DEFAULT_CX - width  / 2);
+    const y = Math.round(DEFAULT_CY - height / 2);
+
     const event: OverlayAddEvent = {
       type: 'OA',
       timestamp: getTimestamp(),
       sessionId,
       overlayId: `o:${Date.now().toString(36)}`,
       assetUuid,
-      x: 100,
-      y: 100,
+      x,
+      y,
       width,
       height,
       rotation: 0,
@@ -597,12 +672,12 @@ export function BoardEditor() {
       opacity: 1.0,
     };
     addOverlayEvent(event);
-    
+
     // アセット参照を更新（ボードネスト用）
     if (localBoardUuid) {
       onAssetAddedToBoard(localBoardUuid, assetUuid);
     }
-  }, [sessionId, activeOverlays.length, addOverlayEvent, localBoardUuid, onAssetAddedToBoard, project]);
+  }, [sessionId, activeOverlays.length, addOverlayEvent, localBoardUuid, onAssetAddedToBoard, project, getBoards, getBoardUuid, loadBoardSnapshot, loadBoardEventsAsync]);
 
   // オーバーレイ削除ハンドラ
   const handleRemoveOverlay = useCallback((event: OverlayRemoveEvent) => {
@@ -699,7 +774,10 @@ export function BoardEditor() {
     viewport: { x: number; y: number; width: number; height: number },
     page: number,
     newAssetUuid?: string,
-    overlayTransform?: { x: number; y: number; width: number; height: number }
+    overlayTransform?: { x: number; y: number; width: number; height: number },
+    _naturalSize?: { width: number; height: number },
+    lockAspectRatio?: boolean,
+    initialBoardViewport?: { x: number; y: number; width: number; height: number },
   ) => {
     const overlay = activeOverlays.find(o => o.overlayId === viewportEditorOverlayId);
     if (!overlay) return;
@@ -762,18 +840,71 @@ export function BoardEditor() {
       }
     } else {
       // アセット変更なし
-      
+
+      // -------------------------------------------------------
+      // 仮想全体表示を保持する overlay 位置・サイズの再計算
+      //
+      // image/document: ViewportEditor 側で計算済みの overlayTransform を使用
+      // board:          ここで計算する（自然サイズが無限なので vpOld を基準にする）
+      // -------------------------------------------------------
+      let finalOverlayTransform = overlayTransform;
+
+      const assetType = project?.assetIndex.byUuid.get(overlay.assetUuid)?.type;
+      if (assetType === 'board') {
+        // vpOld の優先順:
+        //   1. initialBoardViewport: applyInitialFit が決定した実効初期 viewport（最も正確）
+        //   2. overlay.viewport:     前回 apply 済みの viewport
+        //   3. DEFAULT_BOARD_VIEWPORT: 上記いずれも使えない場合のフォールバック
+        const vpOld =
+          (initialBoardViewport && initialBoardViewport.width > 0)
+            ? initialBoardViewport
+            : (overlay.viewport.width > 0 && overlay.viewport.height > 0)
+              ? overlay.viewport
+              : { x: -960, y: -540, width: 1920, height: 1080 };
+        const vpNew = viewport;
+
+        // 仮想全体表示のスケール（ボード座標 1 単位 = WB 上の何 px か）
+        const sx = overlay.width  / vpOld.width;
+        const sy = overlay.height / vpOld.height;
+
+        // 仮想全体表示の WB 上の原点
+        const tx = overlay.x - vpOld.x * sx;
+        const ty = overlay.y - vpOld.y * sy;
+
+        // 新しい viewport を適用した overlay の WB 座標
+        const newX = tx + vpNew.x * sx;
+        const newY = ty + vpNew.y * sy;
+        const newW = vpNew.width  * sx;
+        const newH = vpNew.height * sy;
+
+        // 変化がある場合のみ overlayTransform を設定
+        const unchanged =
+          Math.abs(newX - overlay.x) < 0.5 &&
+          Math.abs(newY - overlay.y) < 0.5 &&
+          Math.abs(newW - overlay.width) < 0.5 &&
+          Math.abs(newH - overlay.height) < 0.5;
+
+        if (!unchanged) {
+          finalOverlayTransform = {
+            x: Math.round(newX),
+            y: Math.round(newY),
+            width:  Math.max(1, Math.round(newW)),
+            height: Math.max(1, Math.round(newH)),
+          };
+        }
+      }
+
       // overlayTransform がある場合は OT イベントも発行
-      if (overlayTransform) {
+      if (finalOverlayTransform) {
         const transformEvent: OverlayTransformEvent = {
           type: 'OT',
           timestamp: getTimestamp(),
           sessionId,
           overlayId: overlay.overlayId,
-          x: overlayTransform.x,
-          y: overlayTransform.y,
-          width: overlayTransform.width,
-          height: overlayTransform.height,
+          x: finalOverlayTransform.x,
+          y: finalOverlayTransform.y,
+          width: finalOverlayTransform.width,
+          height: finalOverlayTransform.height,
           rotation: overlay.rotation,
         };
         transformOverlayEvent(transformEvent, {
@@ -784,7 +915,7 @@ export function BoardEditor() {
           rotation: overlay.rotation,
         });
       }
-      
+
       // viewport/page 変更
       const event: OverlayViewportEvent = {
         type: 'OV',
@@ -794,7 +925,7 @@ export function BoardEditor() {
         viewport,
         page,
       };
-      
+
       viewportOverlayEvent(event, {
         viewport: overlay.viewport,
         page: overlay.page,
@@ -802,15 +933,169 @@ export function BoardEditor() {
     }
     
     setViewportEditorOverlayId(null);
+    // renderKey キャッシュを削除 → 次の loadImages で必ず再生成される
+    overlayRenderKeyRef.current.delete(overlay.overlayId);
+    // ローディング表示を開始
+    setLoadingOverlayIds(prev => new Set([...prev, overlay.overlayId]));
+    // AR ロック設定を保存
+    if (lockAspectRatio !== undefined && overlay.overlayId) {
+      setOverlayLockAspectRatios(prev => new Map([...prev, [overlay.overlayId, lockAspectRatio]]));
+    }
     // ドラッグ状態をリセットするため、選択も解除
     setSelectedOverlayId(null);
-  }, [activeOverlays, viewportEditorOverlayId, sessionId, removeOverlayEvent, addOverlayEvent, transformOverlayEvent, viewportOverlayEvent, localBoardUuid, onAssetRemovedFromBoard, onAssetAddedToBoard]);
+  }, [activeOverlays, viewportEditorOverlayId, sessionId, removeOverlayEvent, addOverlayEvent, transformOverlayEvent, viewportOverlayEvent, localBoardUuid, onAssetRemovedFromBoard, onAssetAddedToBoard, project]);
 
   // ViewportEditor 用のオーバーレイ情報
   const viewportEditorOverlay = useMemo(() => {
     if (!viewportEditorOverlayId) return null;
     return activeOverlays.find(o => o.overlayId === viewportEditorOverlayId) || null;
   }, [viewportEditorOverlayId, activeOverlays]);
+
+  // インラインコントロール: 選択中のオーバーレイ情報
+  const selectedOverlay = useMemo(() => {
+    if (!selectedOverlayId) return null;
+    return activeOverlays.find(o => o.overlayId === selectedOverlayId) || null;
+  }, [selectedOverlayId, activeOverlays]);
+
+  const selectedOverlayAssetType = useMemo((): AssetType => {
+    if (!selectedOverlay || !project) return 'image';
+    return project.assetIndex.byUuid.get(selectedOverlay.assetUuid)?.type ?? 'image';
+  }, [selectedOverlay, project]);
+
+  // 透明度変更（スライダー解放時: Undo スタックに乗る）
+  const handleOpacityCommit = useCallback((opacity: number) => {
+    if (!selectedOverlay) return;
+    const event: OverlayStyleEvent = {
+      type: 'OS',
+      timestamp: getTimestamp(),
+      sessionId,
+      overlayId: selectedOverlay.overlayId,
+      zIndex: selectedOverlay.zIndex,
+      opacity,
+    };
+    styleOverlayEvent(event, {
+      zIndex: selectedOverlay.zIndex,
+      opacity: selectedOverlay.opacity,
+    });
+    // プレビュー用オーバーライドをクリア（state が反映されるので不要になる）
+    setOverlayOpacityOverrides(new Map());
+  }, [selectedOverlay, sessionId, styleOverlayEvent]);
+
+  // zIndex 変更ヘルパー
+  const changeZIndex = useCallback((newZIndex: number) => {
+    if (!selectedOverlay) return;
+    const event: OverlayStyleEvent = {
+      type: 'OS',
+      timestamp: getTimestamp(),
+      sessionId,
+      overlayId: selectedOverlay.overlayId,
+      zIndex: newZIndex,
+      opacity: selectedOverlay.opacity,
+    };
+    styleOverlayEvent(event, {
+      zIndex: selectedOverlay.zIndex,
+      opacity: selectedOverlay.opacity,
+    });
+  }, [selectedOverlay, sessionId, styleOverlayEvent]);
+
+  // z-order: sortedOverlays は zIndex 昇順（getActiveOverlays と同じ順序）
+  const sortedOverlays = useMemo(
+    () => [...activeOverlays].sort((a, b) => a.zIndex - b.zIndex),
+    [activeOverlays]
+  );
+
+  const handleBringToFront = useCallback(() => {
+    const maxZ = Math.max(...activeOverlays.map(o => o.zIndex));
+    if (selectedOverlay && selectedOverlay.zIndex < maxZ) changeZIndex(maxZ + 1);
+  }, [activeOverlays, selectedOverlay, changeZIndex]);
+
+  const handleBringForward = useCallback(() => {
+    if (!selectedOverlay) return;
+    const idx = sortedOverlays.findIndex(o => o.overlayId === selectedOverlay.overlayId);
+    if (idx < 0 || idx === sortedOverlays.length - 1) return;
+    const above = sortedOverlays[idx + 1];
+    // 隣と zIndex をスワップ
+    changeZIndex(above.zIndex);
+    const aboveEvent: OverlayStyleEvent = {
+      type: 'OS',
+      timestamp: getTimestamp(),
+      sessionId,
+      overlayId: above.overlayId,
+      zIndex: selectedOverlay.zIndex,
+      opacity: above.opacity,
+    };
+    styleOverlayEvent(aboveEvent, { zIndex: above.zIndex, opacity: above.opacity });
+  }, [selectedOverlay, sortedOverlays, changeZIndex, sessionId, styleOverlayEvent]);
+
+  const handleSendBackward = useCallback(() => {
+    if (!selectedOverlay) return;
+    const idx = sortedOverlays.findIndex(o => o.overlayId === selectedOverlay.overlayId);
+    if (idx <= 0) return;
+    const below = sortedOverlays[idx - 1];
+    changeZIndex(below.zIndex);
+    const belowEvent: OverlayStyleEvent = {
+      type: 'OS',
+      timestamp: getTimestamp(),
+      sessionId,
+      overlayId: below.overlayId,
+      zIndex: selectedOverlay.zIndex,
+      opacity: below.opacity,
+    };
+    styleOverlayEvent(belowEvent, { zIndex: below.zIndex, opacity: below.opacity });
+  }, [selectedOverlay, sortedOverlays, changeZIndex, sessionId, styleOverlayEvent]);
+
+  const handleSendToBack = useCallback(() => {
+    const minZ = Math.min(...activeOverlays.map(o => o.zIndex));
+    if (selectedOverlay && selectedOverlay.zIndex > minZ) changeZIndex(minZ - 1);
+  }, [activeOverlays, selectedOverlay, changeZIndex]);
+
+  // PDF ページ変更（インラインコントロールから）
+  const handleInlinePageChange = useCallback((page: number) => {
+    if (!selectedOverlay) return;
+    const event: OverlayViewportEvent = {
+      type: 'OV',
+      timestamp: getTimestamp(),
+      sessionId,
+      overlayId: selectedOverlay.overlayId,
+      viewport: selectedOverlay.viewport,
+      page,
+    };
+    viewportOverlayEvent(event, {
+      viewport: selectedOverlay.viewport,
+      page: selectedOverlay.page,
+    });
+  }, [selectedOverlay, sessionId, viewportOverlayEvent]);
+
+  // インラインコントロールから削除
+  const handleInlineDelete = useCallback(() => {
+    if (!selectedOverlayId) return;
+    const overlay = activeOverlays.find(o => o.overlayId === selectedOverlayId);
+    if (!overlay) return;
+    const removeEvent: OverlayRemoveEvent = {
+      type: 'OR',
+      timestamp: getTimestamp(),
+      sessionId,
+      removeId: `r:${Date.now().toString(36)}`,
+      targetOverlayIds: [selectedOverlayId],
+    };
+    const targetOverlays: OverlayAddEvent[] = [{
+      type: 'OA',
+      timestamp: '',
+      sessionId: '',
+      overlayId: overlay.overlayId,
+      assetUuid: overlay.assetUuid,
+      x: overlay.x, y: overlay.y,
+      width: overlay.width, height: overlay.height,
+      rotation: overlay.rotation,
+      viewport: overlay.viewport,
+      page: overlay.page,
+      zIndex: overlay.zIndex,
+      opacity: overlay.opacity,
+    }];
+    removeOverlayEvent(removeEvent, targetOverlays);
+    setSelectedOverlayId(null);
+    if (localBoardUuid) onAssetRemovedFromBoard(localBoardUuid, overlay.assetUuid);
+  }, [selectedOverlayId, activeOverlays, sessionId, removeOverlayEvent, localBoardUuid, onAssetRemovedFromBoard]);
 
   // overlayId → AssetType のマップ（WhiteboardCanvas に渡して描画時に viewport source rect を使うか判定）
   const overlayAssetTypes = useMemo(() => {
@@ -1154,7 +1439,7 @@ export function BoardEditor() {
         onImportFile={importAsset}
         availableAssets={availableAssets}
       />
-      <main className={`canvas-container ${isHostPreparing ? 'preparing' : ''}`}>
+      <main className={`canvas-container ${isHostPreparing ? 'preparing' : ''}`} style={{ position: 'relative' }}>
         <WhiteboardCanvas
           activeStrokes={activeStrokes}
           activeOverlays={activeOverlays}
@@ -1166,6 +1451,9 @@ export function BoardEditor() {
           selectedOverlayId={selectedOverlayId}
           overlayImages={overlayImages}
           overlayAssetTypes={overlayAssetTypes}
+          overlayOpacityOverrides={overlayOpacityOverrides}
+          overlayLockAspectRatios={overlayLockAspectRatios}
+          loadingOverlayIds={loadingOverlayIds}
           onAddDrawEvent={addDrawEvent}
           onAddEraseEvent={addEraseEvent}
           onRemoveOverlayEvent={handleRemoveOverlay}
@@ -1176,6 +1464,34 @@ export function BoardEditor() {
           onHideCursor={hideCursor}
           onTransformChange={handleTransformChange}
         />
+
+        {/* オーバーレイ選択中: インラインコントロール */}
+        {selectedOverlay && tool === 'select' && (() => {
+          const selIdx = sortedOverlays.findIndex(o => o.overlayId === selectedOverlay.overlayId);
+          const canBringForward = selIdx < sortedOverlays.length - 1;
+          const canSendBackward = selIdx > 0;
+          return (
+            <OverlayInlineControls
+              overlay={selectedOverlay}
+              assetType={selectedOverlayAssetType}
+              canvasTransform={canvasTransformFull}
+              pdfTotalPages={pdfPageCounts.get(selectedOverlay.assetUuid) ?? 1}
+              canBringForward={canBringForward}
+              canSendBackward={canSendBackward}
+              onBringToFront={handleBringToFront}
+              onBringForward={handleBringForward}
+              onSendBackward={handleSendBackward}
+              onSendToBack={handleSendToBack}
+              onPageChange={handleInlinePageChange}
+              onOpacityPreview={(opacity) => {
+                setOverlayOpacityOverrides(new Map([[selectedOverlay.overlayId, opacity]]));
+              }}
+              onOpacityCommit={handleOpacityCommit}
+              onOpenViewportEditor={() => setViewportEditorOverlayId(selectedOverlayId!)}
+              onDelete={handleInlineDelete}
+            />
+          );
+        })()}
       </main>
       
       {/* ViewportEditor モーダル */}
@@ -1186,6 +1502,7 @@ export function BoardEditor() {
           assetUuid={viewportEditorOverlay.assetUuid}
           assetName={viewportEditorAssetName}
           availableAssets={availableAssets}
+          lockAspectRatio={overlayLockAspectRatios.get(viewportEditorOverlay.overlayId) ?? true}
           onApply={handleApplyViewport}
           onClose={handleCloseViewportEditor}
           onUploadFile={importAsset}

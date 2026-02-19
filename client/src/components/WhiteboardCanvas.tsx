@@ -36,6 +36,12 @@ interface WhiteboardCanvasProps {
   selectedOverlayId: string | null;
   overlayImages: Map<string, HTMLImageElement>;
   overlayAssetTypes: Map<string, AssetType>;
+  /** ドラッグ中のリアルタイム透明度プレビュー用（overlayId → opacity） */
+  overlayOpacityOverrides?: Map<string, number>;
+  /** AR ロック設定（overlayId → locked, デフォルト true） */
+  overlayLockAspectRatios?: Map<string, boolean>;
+  /** 再生成中の overlayId セット（スピナー表示用） */
+  loadingOverlayIds?: Set<string>;
   onAddDrawEvent: (event: DrawEvent) => void;
   onAddEraseEvent: (event: EraseEvent, targetStrokes: DrawEvent[]) => void;
   onRemoveOverlayEvent: (event: OverlayRemoveEvent) => void;
@@ -58,6 +64,9 @@ export function WhiteboardCanvas({
   selectedOverlayId,
   overlayImages,
   overlayAssetTypes,
+  overlayOpacityOverrides,
+  overlayLockAspectRatios,
+  loadingOverlayIds,
   onAddDrawEvent,
   onAddEraseEvent,
   onRemoveOverlayEvent,
@@ -142,6 +151,57 @@ export function WhiteboardCanvas({
   }, []);
 
   // 描画関数
+  // ----------------------------------------------------------------
+  // スピナー描画ヘルパー（canvas 座標系で呼ぶ）
+  // hasExistingImage=true のとき: 半透明フィルム + 隅スピナー
+  // hasExistingImage=false のとき: 中央スピナー
+  // ----------------------------------------------------------------
+  const drawLoadingOverlay = useCallback((
+    ctx: CanvasRenderingContext2D,
+    x: number, y: number, w: number, h: number,
+    scale: number,
+    hasExistingImage: boolean,
+  ) => {
+    const angle = (Date.now() / 600) * Math.PI * 2; // 0.6s で1回転
+    const r = Math.min(12, Math.min(w, h) * 0.12) / scale; // 半径（最大12論理px）
+
+    if (hasExistingImage) {
+      // 既存画像の上に薄いフィルム
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.fillRect(x, y, w, h);
+      // 右下隅にスピナー
+      const cx = x + w - r * 1.8;
+      const cy = y + h - r * 1.8;
+      drawSpinner(ctx, cx, cy, r, angle, scale);
+    } else {
+      // 中央にスピナー
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      drawSpinner(ctx, cx, cy, r, angle, scale);
+    }
+  }, []);
+
+  const drawSpinner = useCallback((
+    ctx: CanvasRenderingContext2D,
+    cx: number, cy: number, r: number,
+    angle: number, scale: number,
+  ) => {
+    // 背景円
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + 2 / scale, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.fill();
+
+    // スピナー弧
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, angle, angle + Math.PI * 1.4);
+    ctx.strokeStyle = '#3b82f6';
+    ctx.lineWidth = Math.max(2 / scale, 0.5);
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    ctx.lineCap = 'butt';
+  }, []);
+
   const render = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -168,7 +228,7 @@ export function WhiteboardCanvas({
     // オーバーレイ描画（ストロークより後ろ）
     for (const overlay of activeOverlays) {
       ctx.save();
-      ctx.globalAlpha = overlay.opacity;
+      ctx.globalAlpha = overlayOpacityOverrides?.get(overlay.overlayId) ?? overlay.opacity;
       
       // ドラッグ中は dragPreview の位置を使用
       const isBeingDragged = selectedOverlayId === overlay.overlayId && dragPreview;
@@ -187,6 +247,8 @@ export function WhiteboardCanvas({
       }
       
       const img = overlayImages.get(overlay.overlayId);
+      const isLoading = loadingOverlayIds?.has(overlay.overlayId) ?? false;
+
       if (img && img.complete) {
         const assetType = overlayAssetTypes.get(overlay.overlayId) ?? 'image';
         // board タイプは viewport がサムネイルに焼き込まれているのでそのまま描画
@@ -200,23 +262,19 @@ export function WhiteboardCanvas({
         } else {
           ctx.drawImage(img, displayX, displayY, displayWidth, displayHeight);
         }
+
+        // ローディング中: 既存画像の上に半透明オーバーレイ + スピナー
+        if (isLoading) {
+          drawLoadingOverlay(ctx, displayX, displayY, displayWidth, displayHeight, transform.scale, true);
+        }
       } else {
-        // プレースホルダを描画（ボードや読み込み中の画像/PDF用）
+        // 画像なし（初回読み込み or 再生成待ち）
         ctx.fillStyle = '#e5e7eb';
         ctx.fillRect(displayX, displayY, displayWidth, displayHeight);
         ctx.strokeStyle = '#9ca3af';
         ctx.lineWidth = 1 / transform.scale;
         ctx.strokeRect(displayX, displayY, displayWidth, displayHeight);
-        
-        // アイコンとラベル
-        ctx.fillStyle = '#6b7280';
-        ctx.font = `${14 / transform.scale}px system-ui, sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        const centerX = displayX + displayWidth / 2;
-        const centerY = displayY + displayHeight / 2;
-        ctx.fillText('📋', centerX, centerY - 10 / transform.scale);
-        ctx.fillText('Loading...', centerX, centerY + 10 / transform.scale);
+        drawLoadingOverlay(ctx, displayX, displayY, displayWidth, displayHeight, transform.scale, false);
       }
       
       // 選択枠を描画
@@ -299,7 +357,7 @@ export function WhiteboardCanvas({
     }
     
     ctx.restore();
-  }, [activeStrokes, activeOverlays, overlayImages, overlayAssetTypes, selectedOverlayId, dragPreview, currentStroke, transform, cursors]);
+  }, [activeStrokes, activeOverlays, overlayImages, overlayAssetTypes, overlayOpacityOverrides, loadingOverlayIds, selectedOverlayId, dragPreview, currentStroke, transform, cursors, drawLoadingOverlay, drawSpinner]);
 
   // 描画ループ
   useEffect(() => {
@@ -562,14 +620,19 @@ export function WhiteboardCanvas({
         let newWidth = initial.width;
         let newHeight = initial.height;
         const aspectRatio = initial.width / initial.height;
-        
+
+        // AR ロック: overlayLockAspectRatios で false に設定されていなければ常にロック
+        // （Shift キーで一時的に解除）
+        const locked = !(overlayLockAspectRatios?.get(selectedOverlayId!) === false);
+        const lockAR = locked ? !shiftPressed : shiftPressed;
+
         switch (dragModeRef.current) {
           case 'resize-nw':
             newX = initial.x + dx;
             newY = initial.y + dy;
             newWidth = initial.width - dx;
             newHeight = initial.height - dy;
-            if (shiftPressed) {
+            if (lockAR) {
               newHeight = newWidth / aspectRatio;
               newY = initial.y + initial.height - newHeight;
             }
@@ -578,7 +641,7 @@ export function WhiteboardCanvas({
             newY = initial.y + dy;
             newWidth = initial.width + dx;
             newHeight = initial.height - dy;
-            if (shiftPressed) {
+            if (lockAR) {
               newHeight = newWidth / aspectRatio;
               newY = initial.y + initial.height - newHeight;
             }
@@ -586,7 +649,7 @@ export function WhiteboardCanvas({
           case 'resize-se':
             newWidth = initial.width + dx;
             newHeight = initial.height + dy;
-            if (shiftPressed) {
+            if (lockAR) {
               newHeight = newWidth / aspectRatio;
             }
             break;
@@ -594,7 +657,7 @@ export function WhiteboardCanvas({
             newX = initial.x + dx;
             newWidth = initial.width - dx;
             newHeight = initial.height + dy;
-            if (shiftPressed) {
+            if (lockAR) {
               newHeight = newWidth / aspectRatio;
             }
             break;
@@ -606,7 +669,7 @@ export function WhiteboardCanvas({
             newX = initial.x + initial.width - 20;
           }
           newWidth = 20;
-          if (shiftPressed) {
+          if (lockAR) {
             newHeight = newWidth / aspectRatio;
           }
         }
@@ -615,7 +678,7 @@ export function WhiteboardCanvas({
             newY = initial.y + initial.height - 20;
           }
           newHeight = 20;
-          if (shiftPressed) {
+          if (lockAR) {
             newWidth = newHeight * aspectRatio;
           }
         }

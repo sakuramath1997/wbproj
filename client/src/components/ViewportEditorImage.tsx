@@ -28,6 +28,8 @@ export interface ViewportEditorImageProps {
   viewport: Viewport;
   onViewportChange: (vp: Viewport) => void;
   onAspectRatioDetected?: (ar: number) => void;
+  /** 画像の自然サイズを通知（trim 後の overlay 位置計算に使用） */
+  onNaturalSizeDetected?: (w: number, h: number) => void;
 }
 
 // ----------------------------------------------------------------
@@ -39,6 +41,7 @@ export function ViewportEditorImage({
   viewport,
   onViewportChange,
   onAspectRatioDetected,
+  onNaturalSizeDetected,
 }: ViewportEditorImageProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -151,6 +154,7 @@ export function ViewportEditorImage({
         setImage(img);
         setIsLoading(false);
         onAspectRatioDetected?.(img.width / img.height);
+        onNaturalSizeDetected?.(img.width, img.height);
         // canvas が既に確定していれば即フィット
         applyInitialFit();
       };

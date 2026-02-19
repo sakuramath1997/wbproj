@@ -17,6 +17,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useProjectStore } from '../hooks/useProjectStore';
 import { computeState, getActiveStrokes, getActiveOverlays } from '../utils/statemachine';
 import { loadAssetFileAsDataUrl } from '../utils/storage';
+import { loadPdfDocument, renderPdfPage } from '../utils/pdf';
 import type { DrawEvent, OverlayState } from '../types';
 
 // ----------------------------------------------------------------
@@ -44,6 +45,8 @@ export interface ViewportEditorBoardProps {
   assetUuid: string;
   viewport: Viewport;
   onViewportChange: (vp: Viewport) => void;
+  /** viewport={0,0,0,0} のとき applyInitialFit が決定した実効初期 viewport を通知 */
+  onInitialViewportReady?: (vp: Viewport) => void;
 }
 
 // ----------------------------------------------------------------
@@ -54,10 +57,11 @@ export function ViewportEditorBoard({
   assetUuid,
   viewport,
   onViewportChange,
+  onInitialViewportReady,
 }: ViewportEditorBoardProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const { project, loadBoardEventsAsync, getBoards, getBoardUuid } = useProjectStore();
+  const { project, loadBoardEventsAsync, getBoards, getBoardUuid, loadBoardSnapshot } = useProjectStore();
 
   // --- コンテンツ ---
   const [strokes, setStrokes] = useState<DrawEvent[]>([]);
@@ -74,6 +78,8 @@ export function ViewportEditorBoard({
 
   // --- 初期フィット済みフラグ ---
   const hasInitialFitRef = useRef(false);
+  // viewport={0,0,0,0} のときの代替 viewport（コンテンツ BBox から計算）
+  const contentBBoxRef = useRef<Viewport | null>(null);
 
   // --- ドラッグ・キー状態 ---
   const dragRef = useRef<DragState | null>(null);
@@ -106,41 +112,21 @@ export function ViewportEditorBoard({
     if (!width || !height || !isContentReady || hasInitialFitRef.current) return;
     hasInitialFitRef.current = true;
 
-    // コンテンツ全体の BBox を計算（ストローク + オーバーレイ）
-    const s = strokesRef.current;
-    const o = overlaysRef.current;
+    const vp = viewportRef.current;
 
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const stroke of s) {
-      if (stroke.bbox) {
-        minX = Math.min(minX, stroke.bbox[0]); minY = Math.min(minY, stroke.bbox[1]);
-        maxX = Math.max(maxX, stroke.bbox[2]); maxY = Math.max(maxY, stroke.bbox[3]);
-      }
-    }
-    for (const ov of o) {
-      minX = Math.min(minX, ov.x); minY = Math.min(minY, ov.y);
-      maxX = Math.max(maxX, ov.x + ov.width); maxY = Math.max(maxY, ov.y + ov.height);
-    }
+    // viewport が {0,0,0,0}（センチネル値）のとき、
+    // コンテンツ BBox を初期 viewport として使う（renderBoardToImage と同じ範囲）
+    // → ホワイトボード上の overlay AR と一致させるため
+    const fitVp = (vp.width > 0 && vp.height > 0)
+      ? vp
+      : (contentBBoxRef.current ?? DEFAULT_BOARD_VIEWPORT);
 
-    // コンテンツがない場合はデフォルト
-    if (minX === Infinity) {
-      minX = DEFAULT_BOARD_VIEWPORT.x;  minY = DEFAULT_BOARD_VIEWPORT.y;
-      maxX = DEFAULT_BOARD_VIEWPORT.x + DEFAULT_BOARD_VIEWPORT.width;
-      maxY = DEFAULT_BOARD_VIEWPORT.y + DEFAULT_BOARD_VIEWPORT.height;
+    if (vp.width === 0) {
+      onViewportChangeRef.current(fitVp);
+      // 実効初期 viewport を BoardEditor に通知（handleApplyViewport の vpOld として使用）
+      onInitialViewportReady?.(fitVp);
     }
 
-    const margin = 50;
-    const fitVp = {
-      x: minX - margin,
-      y: minY - margin,
-      width:  maxX - minX + margin * 2,
-      height: maxY - minY + margin * 2,
-    };
-
-    // viewport を内容フィット状態に更新
-    onViewportChangeRef.current(fitVp);
-
-    // キャンバス中央にビューポートを表示
     const padding = 80;
     const scale = Math.min(
       (width - padding) / fitVp.width,
@@ -220,8 +206,36 @@ export function ViewportEditorBoard({
 
     loadBoardEventsAsync(boardId).then((events) => {
       const state = computeState(events);
-      setStrokes(getActiveStrokes(state));
-      setOverlays(getActiveOverlays(state));
+      const loadedStrokes = getActiveStrokes(state);
+      const loadedOverlays = getActiveOverlays(state);
+      setStrokes(loadedStrokes);
+      setOverlays(loadedOverlays);
+
+      // コンテンツ BBox を計算（viewport={0,0,0,0} 時の初期 viewport として使用）
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const s of loadedStrokes) {
+        if (s.bbox) {
+          minX = Math.min(minX, s.bbox[0]); minY = Math.min(minY, s.bbox[1]);
+          maxX = Math.max(maxX, s.bbox[2]); maxY = Math.max(maxY, s.bbox[3]);
+        }
+      }
+      for (const o of loadedOverlays) {
+        minX = Math.min(minX, o.x); minY = Math.min(minY, o.y);
+        maxX = Math.max(maxX, o.x + o.width); maxY = Math.max(maxY, o.y + o.height);
+      }
+
+      if (minX !== Infinity) {
+        const margin = 50;
+        contentBBoxRef.current = {
+          x: minX - margin, y: minY - margin,
+          width:  maxX - minX + margin * 2,
+          height: maxY - minY + margin * 2,
+        };
+      } else {
+        // コンテンツ空 → DEFAULT_BOARD_VIEWPORT にフォールバック
+        contentBBoxRef.current = DEFAULT_BOARD_VIEWPORT;
+      }
+
       setIsLoading(false);
       setIsContentReady(true);
     });
@@ -229,46 +243,114 @@ export function ViewportEditorBoard({
   }, [assetUuid, project]); // viewport は意図的に除外（変更のたびに再ロードしない）
 
   // ----------------------------------------------------------------
-  // オーバーレイ画像読み込み
+  // board サブオーバーレイのサムネイル生成（簡易版・ストロークのみ）
+  // ----------------------------------------------------------------
+
+  const renderSubBoardToImage = useCallback(async (subOv: OverlayState): Promise<HTMLImageElement | null> => {
+    let boardId: string | null = null;
+    for (const board of getBoards()) {
+      if (getBoardUuid(board.id) === subOv.assetUuid) { boardId = board.id; break; }
+    }
+    if (!boardId) return null;
+
+    let events;
+    try {
+      const snap = await loadBoardSnapshot(boardId);
+      events = snap?.length ? snap : await loadBoardEventsAsync(boardId);
+    } catch { return null; }
+
+    const boardState = computeState(events);
+    const boardStrokes = getActiveStrokes(boardState);
+    const boardSubOverlays = getActiveOverlays(boardState);
+
+    const vp = subOv.viewport;
+    const hasVp = vp.width > 0 && vp.height > 0;
+    const minX = hasVp ? vp.x : -960;
+    const minY = hasVp ? vp.y : -540;
+    const maxX = hasVp ? vp.x + vp.width : 960;
+    const maxY = hasVp ? vp.y + vp.height : 540;
+
+    const contentW = Math.max(maxX - minX, 1);
+    const contentH = Math.max(maxY - minY, 1);
+    const thumbW = Math.min(Math.ceil(subOv.width * (window.devicePixelRatio || 1) * 1.5), 2048);
+    const thumbH = Math.round(thumbW / (contentW / contentH));
+    const scale = thumbW / contentW;
+
+    const tc = document.createElement('canvas');
+    tc.width = thumbW; tc.height = thumbH;
+    const tctx = tc.getContext('2d')!;
+    tctx.fillStyle = '#f9fafb';
+    tctx.fillRect(0, 0, thumbW, thumbH);
+
+    tctx.save();
+    tctx.scale(scale, scale);
+    tctx.translate(-minX, -minY);
+
+    // サブオーバーレイはグレープレースホルダー
+    for (const o of boardSubOverlays) {
+      tctx.fillStyle = '#d1d5db';
+      tctx.fillRect(o.x, o.y, o.width, o.height);
+    }
+
+    tctx.lineCap = 'round'; tctx.lineJoin = 'round';
+    for (const stroke of boardStrokes) {
+      tctx.strokeStyle = stroke.color;
+      tctx.lineWidth = stroke.width;
+      tctx.stroke(new Path2D(stroke.path));
+    }
+    tctx.restore();
+
+    const img = new Image();
+    img.src = tc.toDataURL('image/png');
+    await new Promise<void>(r => { img.onload = () => r(); });
+    return img;
+  }, [getBoards, getBoardUuid, loadBoardSnapshot, loadBoardEventsAsync]);
+
+  // ----------------------------------------------------------------
+  // オーバーレイ画像読み込み（overlayId をキーに、型別ローダーを使用）
   // ----------------------------------------------------------------
 
   useEffect(() => {
-    if (overlays.length === 0) return;
+    if (overlays.length === 0 || !project) return;
 
     const current = overlayImagesRef.current;
-    const toLoad = overlays.filter(
-      (o) => o.assetUuid && !current.has(o.assetUuid)
-    );
+    // overlayId でキー管理（同一アセット・異なるページ/viewportに対応）
+    const toLoad = overlays.filter(o => o.assetUuid && !current.has(o.overlayId));
     if (toLoad.length === 0) return;
 
     let cancelled = false;
     Promise.all(
-      toLoad.map(async (o) => {
+      toLoad.map(async (o): Promise<[string, HTMLImageElement] | null> => {
+        const assetType = project.assetIndex.byUuid.get(o.assetUuid)?.type ?? 'image';
         try {
-          const dataUrl = await loadAssetFileAsDataUrl(o.assetUuid);
-          if (!dataUrl) return null;
-          const img = new Image();
-          await new Promise<void>((res, rej) => {
-            img.onload = () => res();
-            img.onerror = rej;
-            img.src = dataUrl;
-          });
-          return [o.assetUuid, img] as [string, HTMLImageElement];
-        } catch {
-          return null;
-        }
+          if (assetType === 'image') {
+            const dataUrl = await loadAssetFileAsDataUrl(o.assetUuid);
+            if (!dataUrl) return null;
+            const img = new Image();
+            await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = rej; img.src = dataUrl; });
+            return [o.overlayId, img];
+          } else if (assetType === 'document') {
+            const dataUrl = await loadAssetFileAsDataUrl(o.assetUuid);
+            if (!dataUrl) return null;
+            const pdfDoc = await loadPdfDocument(dataUrl);
+            const img = await renderPdfPage(pdfDoc, o.page > 0 ? o.page : 1);
+            return [o.overlayId, img];
+          } else if (assetType === 'board') {
+            const img = await renderSubBoardToImage(o);
+            return img ? [o.overlayId, img] : null;
+          }
+        } catch { return null; }
+        return null;
       })
     ).then((results) => {
       if (cancelled) return;
       const next = new Map(current);
-      for (const r of results) {
-        if (r) next.set(r[0], r[1]);
-      }
+      for (const r of results) { if (r) next.set(r[0], r[1]); }
       setOverlayImages(next);
     });
 
     return () => { cancelled = true; };
-  }, [overlays]);
+  }, [overlays, project, renderSubBoardToImage]);
 
   // ----------------------------------------------------------------
   // グリッド描画ヘルパー
@@ -328,11 +410,22 @@ export function ViewportEditorBoard({
 
     // オーバーレイ
     for (const overlay of overlays) {
-      const img = overlayImages.get(overlay.assetUuid);
+      const img = overlayImages.get(overlay.overlayId);  // overlayId でルックアップ
+      const assetType = project?.assetIndex.byUuid.get(overlay.assetUuid)?.type ?? 'image';
       ctx.save();
       ctx.globalAlpha = overlay.opacity;
       if (img && img.complete) {
-        ctx.drawImage(img, overlay.x, overlay.y, overlay.width, overlay.height);
+        // board はサムネイルに viewport が焼き込み済みなのでそのまま描画
+        // image/document は viewport を source rect として適用（WhiteboardCanvas と同じ処理）
+        if (assetType !== 'board' && overlay.viewport.width > 0 && overlay.viewport.height > 0) {
+          ctx.drawImage(
+            img,
+            overlay.viewport.x, overlay.viewport.y, overlay.viewport.width, overlay.viewport.height,
+            overlay.x, overlay.y, overlay.width, overlay.height
+          );
+        } else {
+          ctx.drawImage(img, overlay.x, overlay.y, overlay.width, overlay.height);
+        }
       } else {
         ctx.fillStyle = '#e5e7eb';
         ctx.fillRect(overlay.x, overlay.y, overlay.width, overlay.height);
@@ -378,7 +471,7 @@ export function ViewportEditorBoard({
     for (const [hx, hy] of [[sx, sy], [sx + sw, sy], [sx + sw, sy + sh], [sx, sy + sh]]) {
       ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
     }
-  }, [strokes, overlays, overlayImages, transform, viewport, canvasSize, drawGrid]);
+  }, [strokes, overlays, overlayImages, transform, viewport, canvasSize, drawGrid, project]);
 
   // ----------------------------------------------------------------
   // キーボード
@@ -546,13 +639,20 @@ export function ViewportEditorBoard({
     const { width, height } = canvasSizeRef.current;
     if (!width || !height) return;
     const vp = viewportRef.current.width === 0 ? DEFAULT_BOARD_VIEWPORT : viewportRef.current;
-    const t = transformRef.current;
-    const vpCX = vp.x + vp.width / 2;
+
+    // 縦横ともに溢れないスケールを計算（applyInitialFit と同じロジック）
+    const padding = 80;
+    const scale = Math.min(
+      (width  - padding) / vp.width,
+      (height - padding) / vp.height,
+      1
+    );
+    const vpCX = vp.x + vp.width  / 2;
     const vpCY = vp.y + vp.height / 2;
     const nt: Transform = {
-      ...t,
-      x: width / 2 - vpCX * t.scale,
-      y: height / 2 - vpCY * t.scale,
+      x: width  / 2 - vpCX * scale,
+      y: height / 2 - vpCY * scale,
+      scale,
     };
     setTransform(nt);
     transformRef.current = nt;
