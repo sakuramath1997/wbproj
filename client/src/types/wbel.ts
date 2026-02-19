@@ -25,6 +25,13 @@ export type BBox = [number, number, number, number];
 // イベント型
 // ========================================
 
+/** ヘッダーイベント */
+export interface HeaderEvent {
+  type: 'H';
+  version: number;
+  createdAt: string;      // ISO 8601
+}
+
 /** Draw イベント */
 export interface DrawEvent {
   type: 'D';

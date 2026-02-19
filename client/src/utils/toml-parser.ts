@@ -178,6 +178,8 @@ export function parseProjectToml(content: string): ProjectConfig {
     if (sectionName.startsWith('boards.')) {
       const id = sectionName.slice('boards.'.length);
       const section = doc[sectionName];
+      const cw = Number(section['canvas_width'] || 0);
+      const ch = Number(section['canvas_height'] || 0);
       boards.set(id, {
         id,
         name: String(section['name'] || `Board ${id}`),
@@ -186,6 +188,7 @@ export function parseProjectToml(content: string): ProjectConfig {
         updatedAt: String(section['updated_at'] || new Date().toISOString()),
         hostedBy: String(section['hosted_by'] || ''),
         hostedSince: String(section['hosted_since'] || ''),
+        ...(cw > 0 && ch > 0 ? { canvasWidth: cw, canvasHeight: ch } : {}),
       });
     }
   }

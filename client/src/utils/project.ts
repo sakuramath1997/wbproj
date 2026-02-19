@@ -19,7 +19,7 @@ import {
   wbassetToToml,
 } from '../types';
 import { parseProjectToml, parseWbasset } from './toml-parser';
-import { parseWbelx, eventsToWbelx } from './wbelx-parser';
+import { parseWbelx, eventsToWbelx, createSnapshot, parseSnapshot } from './wbelx-parser';
 import { generateUuid, getNextBoardId } from './common';
 
 // ========================================
@@ -32,6 +32,10 @@ export interface Project {
   boards: Map<string, WbelxEvent[]>;  // id → events
   /** uuid → { data, mimeType } のアセットバイナリ（画像・PDF等） */
   assetFiles: Map<string, { data: ArrayBuffer; mimeType: string; fileName: string }>;
+  /** id → snapshot events（ZIP からの読み込み / ZIP への書き出し用） */
+  snapshots: Map<string, WbelxEvent[]>;
+  /** id → PNG Blob（サムネイル。ZIP 出力・UI 表示用） */
+  thumbnails: Map<string, Blob>;
 }
 
 // ========================================
@@ -67,6 +71,8 @@ export function createNewProject(name: string): Project {
     assetIndex,
     boards: new Map([[boardId, []]]),
     assetFiles: new Map(),
+    snapshots: new Map(),
+    thumbnails: new Map(),
   };
 }
 
@@ -185,7 +191,30 @@ export async function loadProject(file: File): Promise<Project> {
     }
   }
 
-  return { config, assetIndex, boards, assetFiles };
+  // スナップショットを読み込み
+  const snapshots = new Map<string, WbelxEvent[]>();
+  for (const [id] of config.boards) {
+    const snapshotFile = zip.file(`boards/${id}.snapshot.wbelx`);
+    if (snapshotFile) {
+      const content = await snapshotFile.async('text');
+      const result = parseSnapshot(content);
+      if (result) {
+        snapshots.set(id, result.events);
+      }
+    }
+  }
+
+  // サムネイルを読み込み
+  const thumbnails = new Map<string, Blob>();
+  for (const [id] of config.boards) {
+    const thumbFile = zip.file(`thumbnails/${id}.png`);
+    if (thumbFile) {
+      const data = await thumbFile.async('arraybuffer');
+      thumbnails.set(id, new Blob([data], { type: 'image/png' }));
+    }
+  }
+
+  return { config, assetIndex, boards, assetFiles, snapshots, thumbnails };
 }
 
 /**
@@ -224,20 +253,38 @@ export async function saveProject(project: Project): Promise<Blob> {
     }
   }
 
-  // thumbnails/ (TODO: サムネイル生成)
+  // snapshots/
+  for (const [id, snapshotEvents] of project.snapshots) {
+    if (snapshotEvents.length > 0) {
+      const hash = `sha256:export-${Date.now().toString(36)}`;
+      boardsFolder?.file(`${id}.snapshot.wbelx`, createSnapshot(snapshotEvents, hash));
+    }
+  }
+
+  // thumbnails/
+  if (project.thumbnails.size > 0) {
+    const thumbsFolder = zip.folder('thumbnails');
+    for (const [id, blob] of project.thumbnails) {
+      thumbsFolder?.file(`${id}.png`, blob);
+    }
+  }
 
   return zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
 }
 
 /**
- * 単一の .wbel/.wbelx ファイルをプロジェクトとして読み込み
+ * 単一の .wbel/.wbelx/.snapshot.wbelx ファイルをプロジェクトとして読み込み。
+ * SS ヘッダー付きスナップショットも同一パーサーで処理する。
  */
 export async function loadSingleBoard(file: File): Promise<Project> {
   const content = await file.text();
+  // parseWbelx は H/SS ヘッダーを自動スキップするので、通常ファイル・スナップショットどちらでもOK
   const events = parseWbelx(content);
 
   // ファイル名からプロジェクト名を生成
-  const name = file.name.replace(/\.(wbelx?|wbel)$/, '');
+  const name = file.name
+    .replace(/\.snapshot\.wbelx$/, '')
+    .replace(/\.(wbelx?|wbel)$/, '');
 
   const project = createNewProject(name);
   project.boards.set('0001', events);

@@ -52,7 +52,7 @@ export function HomePage() {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".wbproj,.wbelx,.wbel"
+          accept=".wbproj,.wbelx,.wbel,.snapshot.wbelx"
           onChange={handleFileChange}
           className="hidden-input"
         />

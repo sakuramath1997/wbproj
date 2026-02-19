@@ -10,6 +10,18 @@ import type { DrawEvent, EraseEvent, SnapshotMarkerEvent, StrokeOperation } from
 export * from './wbel';
 
 // ========================================
+// スナップショットヘッダー
+// ========================================
+
+/** スナップショットヘッダーイベント */
+export interface SnapshotHeaderEvent {
+  type: 'SS';
+  version: number;
+  hash: string;
+  createdAt: string;      // ISO 8601
+}
+
+// ========================================
 // Viewport 型
 // ========================================
 

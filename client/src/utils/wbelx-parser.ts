@@ -9,12 +9,14 @@ import type {
   DrawEvent,
   EraseEvent,
   SnapshotMarkerEvent,
+  HeaderEvent,
   OverlayAddEvent,
   OverlayRemoveEvent,
   OverlayTransformEvent,
   OverlayViewportEvent,
   OverlayStyleEvent,
   WbelxEvent,
+  SnapshotHeaderEvent,
   Viewport,
 } from '../types';
 
@@ -181,19 +183,51 @@ function parseCsvLine(line: string): WbelxEvent | null {
 // ========================================
 
 export function parseWbelx(content: string): WbelxEvent[] {
+  return parseWbelxWithHeader(content).events;
+}
+
+/** パース結果（ヘッダー付き） */
+export interface ParsedWbelx {
+  header: HeaderEvent | null;
+  snapshotHeader: SnapshotHeaderEvent | null;
+  events: WbelxEvent[];
+}
+
+/**
+ * ファイル全体をパースし、ヘッダー情報も返す。
+ * H/SS 行があれば header/snapshotHeader に格納し、それ以外を events に収める。
+ * .wbelx / .snapshot.wbelx 両方に対応。
+ */
+export function parseWbelxWithHeader(content: string): ParsedWbelx {
   const lines = content.split('\n');
   const events: WbelxEvent[] = [];
+  let header: HeaderEvent | null = null;
+  let snapshotHeader: SnapshotHeaderEvent | null = null;
 
-  // 先頭の有効行を見てフォーマット判別
   const firstLine = lines.find(l => l.trim() && !l.trim().startsWith('#') && !l.trim().startsWith('//'));
   const isJsonl = firstLine?.trim().startsWith('{') ?? false;
 
   for (const line of lines) {
+    if (isJsonl) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('//')) continue;
+      try {
+        const obj = JSON.parse(trimmed);
+        if (obj.type === 'H' && !header) {
+          header = { type: 'H', version: obj.version ?? 1, createdAt: obj.createdAt ?? '' };
+          continue;
+        }
+        if (obj.type === 'SS' && !snapshotHeader) {
+          snapshotHeader = { type: 'SS', version: obj.version ?? 1, hash: obj.hash ?? '', createdAt: obj.createdAt ?? '' };
+          continue;
+        }
+      } catch { continue; }
+    }
     const event = isJsonl ? parseJsonLine(line) : parseCsvLine(line);
     if (event) events.push(event);
   }
 
-  return events;
+  return { header, snapshotHeader, events };
 }
 
 // ========================================
@@ -215,28 +249,18 @@ export function eventsToWbelx(events: WbelxEvent[]): string {
 // ========================================
 
 export function parseSnapshot(content: string): { hash: string; events: WbelxEvent[] } | null {
-  const lines = content.split('\n');
-  if (lines.length === 0) return null;
-
-  const firstLine = lines[0].trim();
-
-  // v2 JSONL スナップショット
-  if (firstLine.startsWith('{')) {
-    try {
-      const header = JSON.parse(firstLine) as { type: string; hash: string };
-      if (header.type !== 'SS' || !header.hash) return null;
-      const eventsContent = lines.slice(1).join('\n');
-      return { hash: header.hash, events: parseWbelx(eventsContent) };
-    } catch {
-      return null;
-    }
+  // v1 CSV スナップショット（後方互換）
+  const firstLine = content.split('\n')[0]?.trim();
+  if (firstLine?.startsWith('#SNAPSHOT,')) {
+    const hash = firstLine.slice('#SNAPSHOT,'.length);
+    const events = parseWbelx(content.split('\n').slice(1).join('\n'));
+    return { hash, events };
   }
 
-  // v1 CSV スナップショット（後方互換）
-  if (firstLine.startsWith('#SNAPSHOT,')) {
-    const hash = firstLine.slice('#SNAPSHOT,'.length);
-    const events = parseWbelx(lines.slice(1).join('\n'));
-    return { hash, events };
+  // v2 JSONL: parseWbelxWithHeader に委譲
+  const parsed = parseWbelxWithHeader(content);
+  if (parsed.snapshotHeader) {
+    return { hash: parsed.snapshotHeader.hash, events: parsed.events };
   }
 
   return null;

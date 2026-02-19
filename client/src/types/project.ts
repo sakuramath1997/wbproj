@@ -50,6 +50,8 @@ export interface BoardInfo {
   updatedAt: string;          // ISO 8601
   hostedBy: string;           // session_id（空文字 = 未ホスト）
   hostedSince: string;        // ISO 8601（空文字 = 未ホスト）
+  canvasWidth?: number;       // px（省略 = 無限キャンバス）
+  canvasHeight?: number;      // px（省略 = 無限キャンバス）
 }
 
 /** [assets.{uuid}] セクション（外部アセットのみ） */
@@ -176,6 +178,10 @@ export function projectConfigToToml(config: ProjectConfig): string {
     if (board.hostedBy) {
       lines.push(`hosted_by = "${board.hostedBy}"`);
       lines.push(`hosted_since = "${board.hostedSince}"`);
+    }
+    if (board.canvasWidth && board.canvasHeight) {
+      lines.push(`canvas_width = ${board.canvasWidth}`);
+      lines.push(`canvas_height = ${board.canvasHeight}`);
     }
     lines.push('');
   }

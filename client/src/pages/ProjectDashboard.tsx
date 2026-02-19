@@ -14,9 +14,11 @@ export function ProjectDashboard() {
     addBoard, 
     renameBoard, 
     deleteBoard, 
+    duplicateBoard,
     renameProject, 
     save, 
-    reorderBoards 
+    reorderBoards,
+    boardThumbnailUrls,
   } = useProjectStore();
   const [activeTab, setActiveTab] = useState<TabType>('boards');
   const [sortKey, setSortKey] = useState<BoardSortKey>('displayOrder');
@@ -172,11 +174,13 @@ export function ProjectDashboard() {
           <BoardsTab 
             boards={boards}
             sortKey={sortKey}
+            thumbnailUrls={boardThumbnailUrls}
             onSortChange={setSortKey}
             onBoardClick={handleBoardClick}
             onReorder={handleReorder}
             onRenameBoard={handleRenameBoard}
             onDeleteBoard={handleDeleteBoard}
+            onDuplicateBoard={async (boardId: string) => { await duplicateBoard(boardId); }}
           />
         )}
         {activeTab === 'assets' && <AssetsTab />}
@@ -193,21 +197,25 @@ export function ProjectDashboard() {
 interface BoardsTabProps {
   boards: BoardInfo[];
   sortKey: BoardSortKey;
+  thumbnailUrls: Map<string, string>;
   onSortChange: (key: BoardSortKey) => void;
   onBoardClick: (boardId: string) => void;
   onReorder: (orderedIds: string[]) => void;
   onRenameBoard: (boardId: string, currentName: string) => void;
   onDeleteBoard: (boardId: string, boardName: string) => void;
+  onDuplicateBoard: (boardId: string) => void;
 }
 
 function BoardsTab({ 
   boards, 
   sortKey, 
+  thumbnailUrls,
   onSortChange, 
   onBoardClick, 
   onReorder,
   onRenameBoard,
   onDeleteBoard,
+  onDuplicateBoard,
 }: BoardsTabProps) {
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
@@ -332,7 +340,7 @@ function BoardsTab({
             )}
             <button 
               className="board-menu-btn"
-              onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
+              onClick={() => {
               }}
             >
               ⋯
@@ -349,6 +357,15 @@ function BoardsTab({
                   ✏️ Rename
                 </button>
                 <button 
+                  className="board-menu-item"
+                  onClick={() => {
+                    setMenuOpenId(null);
+                    onDuplicateBoard(board.id);
+                  }}
+                >
+                  📄 Duplicate
+                </button>
+                <button 
                   className="board-menu-item danger"
                   onClick={() => {
                     setMenuOpenId(null);
@@ -360,7 +377,15 @@ function BoardsTab({
               </div>
             )}
             <div className="board-thumbnail">
-              📝
+              {thumbnailUrls.get(board.id) ? (
+                <img 
+                  src={thumbnailUrls.get(board.id)} 
+                  alt={board.name}
+                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                />
+              ) : (
+                <span>📝</span>
+              )}
             </div>
             <div className="board-info">
               <div className="board-name">{board.name}</div>

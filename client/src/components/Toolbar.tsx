@@ -24,6 +24,8 @@ interface ToolbarProps {
   onAddAsset?: (uuid: string) => void;
   onImportFile?: (file: File) => Promise<string | null>;
   availableAssets?: Array<{ uuid: string; fileName: string; type: 'image' | 'document' | 'board' }>;
+  canvasSize?: { width: number; height: number };
+  onCanvasSizeChange?: (width: number | undefined, height: number | undefined) => void;
 }
 
 export function Toolbar({
@@ -48,12 +50,27 @@ export function Toolbar({
   onAddAsset,
   onImportFile,
   availableAssets = [],
+  canvasSize,
+  onCanvasSizeChange,
 }: ToolbarProps) {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showAssetMenu, setShowAssetMenu] = useState(false);
+  const [showCanvasSizeMenu, setShowCanvasSizeMenu] = useState(false);
+  const [customWidth, setCustomWidth] = useState('');
+  const [customHeight, setCustomHeight] = useState('');
   const [linkCopied, setLinkCopied] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const CANVAS_PRESETS = [
+    { label: '∞ Infinite', w: undefined, h: undefined },
+    { label: 'Full HD (1920×1080)', w: 1920, h: 1080 },
+    { label: '4K (3840×2160)', w: 3840, h: 2160 },
+    { label: 'A4 Landscape (1123×794)', w: 1123, h: 794 },
+    { label: 'A4 Portrait (794×1123)', w: 794, h: 1123 },
+    { label: 'Letter Landscape (1056×816)', w: 1056, h: 816 },
+    { label: 'Square (1024×1024)', w: 1024, h: 1024 },
+  ] as const;
 
   const handleCopyLink = useCallback(() => {
     onCopyShareLink?.();
@@ -303,6 +320,86 @@ export function Toolbar({
       >
         {linkCopied ? '✓ Copied!' : '🔗 Share'}
       </button>
+
+      {/* Canvas size */}
+      {onCanvasSizeChange && (
+        <div style={{ position: 'relative' }}>
+          <button
+            className="toolbar-action-btn"
+            onClick={() => setShowCanvasSizeMenu(!showCanvasSizeMenu)}
+            title="Canvas size"
+          >
+            📐 {canvasSize ? `${canvasSize.width}×${canvasSize.height}` : 'Infinite'}
+          </button>
+          {showCanvasSizeMenu && (
+            <>
+              <div 
+                className="dropdown-backdrop"
+                onClick={() => setShowCanvasSizeMenu(false)}
+              />
+              <div className="dropdown-menu" style={{ right: 0, minWidth: 220 }}>
+                {CANVAS_PRESETS.map((preset, i) => {
+                  const isActive = preset.w === undefined
+                    ? !canvasSize
+                    : canvasSize?.width === preset.w && canvasSize?.height === preset.h;
+                  return (
+                    <button
+                      key={i}
+                      className={`dropdown-item ${isActive ? 'active' : ''}`}
+                      onClick={() => {
+                        onCanvasSizeChange(preset.w, preset.h);
+                        setShowCanvasSizeMenu(false);
+                      }}
+                    >
+                      {isActive ? '✓ ' : ''}{preset.label}
+                    </button>
+                  );
+                })}
+                <div style={{ borderTop: '1px solid #e5e7eb', margin: '4px 0' }} />
+                <div style={{ padding: '6px 12px' }}>
+                  <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>Custom size</div>
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    <input
+                      type="number"
+                      placeholder="W"
+                      value={customWidth}
+                      onChange={e => setCustomWidth(e.target.value)}
+                      style={{ width: 60, padding: '2px 4px', fontSize: 12, border: '1px solid #d1d5db', borderRadius: 3 }}
+                      min={1}
+                    />
+                    <span style={{ fontSize: 12, color: '#9ca3af' }}>×</span>
+                    <input
+                      type="number"
+                      placeholder="H"
+                      value={customHeight}
+                      onChange={e => setCustomHeight(e.target.value)}
+                      style={{ width: 60, padding: '2px 4px', fontSize: 12, border: '1px solid #d1d5db', borderRadius: 3 }}
+                      min={1}
+                    />
+                    <button
+                      className="toolbar-btn"
+                      style={{ fontSize: 12, padding: '2px 8px' }}
+                      disabled={!customWidth || !customHeight || Number(customWidth) < 1 || Number(customHeight) < 1}
+                      onClick={() => {
+                        const w = Math.round(Number(customWidth));
+                        const h = Math.round(Number(customHeight));
+                        if (w > 0 && h > 0) {
+                          onCanvasSizeChange(w, h);
+                          setShowCanvasSizeMenu(false);
+                          setCustomWidth('');
+                          setCustomHeight('');
+                        }
+                      }}
+                    >
+                      Set
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Export dropdown */}
       <div style={{ position: 'relative' }}>

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { BoardInfo, WbelxEvent, SnapshotMarkerEvent, WbAsset, AssetType } from '../types';
-import { removeFromAssetIndex, addToAssetIndex, onOverlayAdded, onOverlayRemoved } from '../types';
+import { removeFromAssetIndex, addToAssetIndex, onOverlayAdded, onOverlayRemoved, createBoardInfo } from '../types';
 import type { Project } from '../utils';
 import { 
   createNewProject, 
@@ -29,8 +29,11 @@ import {
   deleteBoardSnapshot,
   deleteBoardData,
   clearAllData,
+  saveBoardThumbnail,
+  loadBoardThumbnail,
 } from '../utils/storage';
 import type { StoredAssetFile } from '../utils/storage';
+import { generateThumbnail } from '../utils/thumbnail';
 
 // ========================================
 // ストア状態
@@ -55,6 +58,9 @@ interface ProjectState {
   // boardId → UUID マッピング（永続化用）
   boardUuids: Map<string, string>;
   
+  // boardId → objectURL（サムネイル表示用）
+  boardThumbnailUrls: Map<string, string>;
+  
   // アクション
   initialize: () => Promise<void>;
   createNew: (name: string) => Promise<void>;
@@ -68,11 +74,14 @@ interface ProjectState {
   // ボード操作
   addBoard: (name: string) => Promise<string | null>;
   renameBoard: (boardId: string, name: string) => Promise<void>;
+  setBoardCanvasSize: (boardId: string, width: number | undefined, height: number | undefined) => Promise<void>;
   deleteBoard: (boardId: string) => Promise<void>;
+  duplicateBoard: (boardId: string) => Promise<string | null>;
   updateBoardEvents: (boardId: string, events: WbelxEvent[]) => Promise<void>;
   getBoardEvents: (boardId: string) => WbelxEvent[];
   loadBoardEventsAsync: (boardId: string) => Promise<WbelxEvent[]>;
   reorderBoards: (orderedIds: string[]) => Promise<void>;
+  regenerateThumbnail: (boardId: string) => Promise<void>;
   
   // スナップショット操作
   saveBoardWithSnapshot: (boardId: string, events: WbelxEvent[], sessionId: string) => Promise<void>;
@@ -105,6 +114,7 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
   isInitialized: false,
   error: null,
   boardUuids: new Map(),
+  boardThumbnailUrls: new Map(),
 
   // 初期化（IndexedDB からデータを読み込む）
   initialize: async () => {
@@ -141,12 +151,38 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
           config,
           boards,
           assetIndex,
-          assetFiles: new Map(), // IndexedDB に保存済み、必要時にロード
+          assetFiles: new Map(),
+          snapshots: new Map(),
+          thumbnails: new Map(),
         };
+        
+        // サムネイルを読み込み
+        const boardThumbnailUrls = new Map<string, string>();
+        for (const boardId of config.boards.keys()) {
+          const blob = await loadBoardThumbnail(boardId);
+          if (blob) {
+            boardThumbnailUrls.set(boardId, URL.createObjectURL(blob));
+          }
+        }
+        
+        // サムネイルがないボードは自動生成
+        for (const [boardId, events] of boards) {
+          if (!boardThumbnailUrls.has(boardId) && events.length > 0) {
+            const boardState = computeState(events);
+            const strokes = getActiveStrokes(boardState);
+            const overlays = getActiveOverlays(boardState);
+            const blob = generateThumbnail(strokes, overlays, config.background);
+            if (blob) {
+              await saveBoardThumbnail(boardId, blob);
+              boardThumbnailUrls.set(boardId, URL.createObjectURL(blob));
+            }
+          }
+        }
         
         set({ 
           project, 
           boardUuids,
+          boardThumbnailUrls,
           isLoading: false, 
           isInitialized: true 
         });
@@ -222,6 +258,13 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
         });
       }
       
+      // スナップショットを保存
+      for (const [boardId, snapshotEvents] of project.snapshots) {
+        if (snapshotEvents.length > 0) {
+          await saveBoardSnapshot(boardId, snapshotEvents);
+        }
+      }
+      
       // boardUuids を assetIndex から派生
       const boardUuids = new Map<string, string>();
       for (const [, asset] of project.assetIndex.byUuid) {
@@ -233,7 +276,29 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
         }
       }
       
-      set({ project, boardUuids, isLoading: false });
+      // サムネイル保存・URL 生成
+      const boardThumbnailUrls = new Map<string, string>();
+      for (const [boardId, blob] of project.thumbnails) {
+        await saveBoardThumbnail(boardId, blob);
+        boardThumbnailUrls.set(boardId, URL.createObjectURL(blob));
+      }
+      
+      // サムネイルがないボードは自動生成
+      for (const [boardId, events] of project.boards) {
+        if (!boardThumbnailUrls.has(boardId) && events.length > 0) {
+          const boardState = computeState(events);
+          const strokes = getActiveStrokes(boardState);
+          const overlays = getActiveOverlays(boardState);
+          const blob = generateThumbnail(strokes, overlays, project.config.background);
+          if (blob) {
+            await saveBoardThumbnail(boardId, blob);
+            project.thumbnails.set(boardId, blob);
+            boardThumbnailUrls.set(boardId, URL.createObjectURL(blob));
+          }
+        }
+      }
+      
+      set({ project, boardUuids, boardThumbnailUrls, isLoading: false });
     } catch (error) {
       set({ 
         isLoading: false, 
@@ -258,6 +323,26 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
               mimeType: stored.mimeType,
               fileName: stored.fileName,
             });
+          }
+        }
+      }
+      
+      // エクスポート用にスナップショットを IndexedDB からロード
+      for (const boardId of project.config.boards.keys()) {
+        if (!project.snapshots.has(boardId)) {
+          const snapshotEvents = await loadBoardSnapshotFromDB(boardId);
+          if (snapshotEvents && snapshotEvents.length > 0) {
+            project.snapshots.set(boardId, snapshotEvents);
+          }
+        }
+      }
+      
+      // エクスポート用にサムネイルを IndexedDB からロード
+      for (const boardId of project.config.boards.keys()) {
+        if (!project.thumbnails.has(boardId)) {
+          const blob = await loadBoardThumbnail(boardId);
+          if (blob) {
+            project.thumbnails.set(boardId, blob);
           }
         }
       }
@@ -353,6 +438,36 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     await saveProjectConfig(newProject.config);
   },
 
+  setBoardCanvasSize: async (boardId: string, width: number | undefined, height: number | undefined) => {
+    const { project } = get();
+    if (!project) return;
+    
+    const boardInfo = project.config.boards.get(boardId);
+    if (!boardInfo) return;
+    
+    const newConfigBoards = new Map(project.config.boards);
+    const updated = { ...boardInfo, updatedAt: new Date().toISOString() };
+    if (width && height) {
+      updated.canvasWidth = width;
+      updated.canvasHeight = height;
+    } else {
+      delete updated.canvasWidth;
+      delete updated.canvasHeight;
+    }
+    newConfigBoards.set(boardId, updated);
+    
+    const newProject = {
+      ...project,
+      config: {
+        ...project.config,
+        boards: newConfigBoards,
+      },
+    };
+    
+    set({ project: newProject });
+    await saveProjectConfig(newProject.config);
+  },
+
   deleteBoard: async (boardId: string) => {
     const { project, boardUuids } = get();
     if (!project) return;
@@ -360,22 +475,57 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     // 最後の1つは削除不可
     if (project.config.boards.size <= 1) return;
     
+    // 削除対象ボードの UUID
+    const deletedUuid = boardUuids.get(boardId);
+    
+    // 他ボードから削除対象ボードを参照しているオーバーレイを OR で論理削除
+    const newBoards = new Map(project.boards);
+    if (deletedUuid) {
+      for (const [otherBoardId, events] of newBoards) {
+        if (otherBoardId === boardId) continue;
+        const state = computeState(events);
+        const overlaysToRemove = getActiveOverlays(state)
+          .filter(o => o.assetUuid === deletedUuid)
+          .map(o => o.overlayId);
+        if (overlaysToRemove.length > 0) {
+          const removeEvent: WbelxEvent = {
+            type: 'OR',
+            timestamp: getTimestamp(),
+            sessionId: 'system',
+            removeId: `r:${generateUuid().slice(0, 8)}`,
+            targetOverlayIds: overlaysToRemove,
+          };
+          const updatedEvents = [...events, removeEvent];
+          newBoards.set(otherBoardId, updatedEvents);
+          await saveBoardEvents(otherBoardId, updatedEvents);
+          // assetIndex の referencedBy を更新
+          const otherBoardUuid = boardUuids.get(otherBoardId);
+          if (otherBoardUuid) {
+            const childAsset = project.assetIndex.byUuid.get(deletedUuid);
+            if (childAsset) {
+              for (const _overlayId of overlaysToRemove) {
+                onOverlayRemoved(otherBoardUuid, childAsset, project.assetIndex);
+              }
+            }
+          }
+        }
+      }
+    }
+    
     // ボード情報を削除
     const newConfigBoards = new Map(project.config.boards);
     newConfigBoards.delete(boardId);
     
     // ボードイベントを削除
-    const newBoards = new Map(project.boards);
     newBoards.delete(boardId);
     
     // UUID マッピングを削除
-    const uuid = boardUuids.get(boardId);
     const newBoardUuids = new Map(boardUuids);
     newBoardUuids.delete(boardId);
     
     // assetIndex から削除
-    if (uuid) {
-      removeFromAssetIndex(project.assetIndex, uuid);
+    if (deletedUuid) {
+      removeFromAssetIndex(project.assetIndex, deletedUuid);
     }
     
     const newProject = {
@@ -466,6 +616,103 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     await saveProjectConfig(newProject.config);
   },
 
+  // サムネイルを再生成
+  regenerateThumbnail: async (boardId: string) => {
+    const { project, boardThumbnailUrls } = get();
+    if (!project) return;
+
+    const events = project.boards.get(boardId);
+    if (!events) return;
+
+    const state = computeState(events);
+    const strokes = getActiveStrokes(state);
+    const overlays = getActiveOverlays(state);
+    const blob = generateThumbnail(strokes, overlays, project.config.background);
+    if (!blob) return;
+
+    // IndexedDB に保存
+    await saveBoardThumbnail(boardId, blob);
+
+    // Project にも保持（エクスポート用）
+    project.thumbnails.set(boardId, blob);
+
+    // objectURL を更新
+    const oldUrl = boardThumbnailUrls.get(boardId);
+    if (oldUrl) URL.revokeObjectURL(oldUrl);
+    const newUrls = new Map(boardThumbnailUrls);
+    newUrls.set(boardId, URL.createObjectURL(blob));
+    set({ boardThumbnailUrls: newUrls });
+  },
+
+  // ボードを複製
+  duplicateBoard: async (boardId: string) => {
+    const { project, boardUuids } = get();
+    if (!project) return null;
+
+    const srcInfo = project.config.boards.get(boardId);
+    const srcEvents = project.boards.get(boardId);
+    if (!srcInfo || !srcEvents) return null;
+
+    // 新しい ID を生成（既存 ID の最大値 + 1）
+    const existingIds = Array.from(project.config.boards.keys()).map(Number).filter(n => !isNaN(n));
+    const nextId = String(Math.max(...existingIds, 0) + 1).padStart(4, '0');
+    const newUuid = generateUuid();
+
+    // ボード情報を作成
+    const newBoardInfo = createBoardInfo(
+      nextId,
+      `${srcInfo.name} (Copy)`,
+      srcInfo.displayOrder + 1,
+    );
+
+    // displayOrder を調整（複製元より後ろのものを +1）
+    const newConfigBoards = new Map(project.config.boards);
+    for (const [id, info] of newConfigBoards) {
+      if (info.displayOrder > srcInfo.displayOrder) {
+        newConfigBoards.set(id, { ...info, displayOrder: info.displayOrder + 1 });
+      }
+    }
+    newConfigBoards.set(nextId, newBoardInfo);
+
+    // イベントをコピー
+    const newBoards = new Map(project.boards);
+    newBoards.set(nextId, [...srcEvents]);
+
+    // wbasset を作成
+    const boardAsset: import('../types').WbAsset = {
+      uuid: newUuid,
+      type: 'board',
+      relativePath: `boards/${nextId}.wbelx`,
+      referencedBy: [],
+      allAncestors: [],
+    };
+    addToAssetIndex(project.assetIndex, boardAsset);
+
+    const newBoardUuids = new Map(boardUuids);
+    newBoardUuids.set(nextId, newUuid);
+
+    const newProject = {
+      ...project,
+      config: { ...project.config, boards: newConfigBoards },
+      boards: newBoards,
+    };
+
+    set({ project: newProject, boardUuids: newBoardUuids });
+
+    // IndexedDB に保存
+    await saveProjectConfig(newProject.config);
+    await saveAssetIndex(newProject.assetIndex);
+    await saveBoardEvents(nextId, srcEvents);
+
+    // スナップショットもコピー
+    const srcSnapshot = await loadBoardSnapshotFromDB(boardId);
+    if (srcSnapshot && srcSnapshot.length > 0) {
+      await saveBoardSnapshot(nextId, srcSnapshot);
+    }
+
+    return nextId;
+  },
+
   // ボードを S イベント付きで保存し、スナップショットも作成
   saveBoardWithSnapshot: async (boardId: string, events: WbelxEvent[], sessionId: string) => {
     const { project } = get();
@@ -533,6 +780,21 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     await saveBoardEvents(boardId, eventsWithSnapshot);
     await saveBoardSnapshot(boardId, snapshotEvents);
     await saveProjectConfig(newProject.config);
+    
+    // サムネイル再生成（非同期、エラーは無視）
+    try {
+      const blob = generateThumbnail(activeStrokes, activeOverlays, project.config.background);
+      if (blob) {
+        await saveBoardThumbnail(boardId, blob);
+        newProject.thumbnails.set(boardId, blob);
+        const { boardThumbnailUrls } = get();
+        const oldUrl = boardThumbnailUrls.get(boardId);
+        if (oldUrl) URL.revokeObjectURL(oldUrl);
+        const newUrls = new Map(boardThumbnailUrls);
+        newUrls.set(boardId, URL.createObjectURL(blob));
+        set({ boardThumbnailUrls: newUrls });
+      }
+    } catch { /* サムネイル生成失敗は無視 */ }
     
   },
 

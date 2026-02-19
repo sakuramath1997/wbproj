@@ -17,6 +17,9 @@ export * from './toml-parser';
 // プロジェクト管理
 export * from './project';
 
+// サムネイル生成
+export * from './thumbnail';
+
 // 曲線フィッティング（名前衝突を避けるため個別エクスポート）
 export {
   fitCurve,

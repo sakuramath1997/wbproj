@@ -43,8 +43,12 @@ interface WhiteboardCanvasProps {
   overlayLockAspectRatios?: Map<string, boolean>;
   /** 再生成中の overlayId セット（スピナー表示用） */
   loadingOverlayIds?: Set<string>;
+  /** アセットが見つからない overlayId セット（プレースホルダー表示用） */
+  missingOverlayIds?: Set<string>;
   /** 背景設定（project.toml の [background]） */
   backgroundConfig?: BackgroundConfig;
+  /** 固定キャンバスサイズ（省略 = 無限キャンバス） */
+  canvasSize?: { width: number; height: number };
   onAddDrawEvent: (event: DrawEvent) => void;
   onAddEraseEvent: (event: EraseEvent, targetStrokes: DrawEvent[]) => void;
   onRemoveOverlayEvent: (event: OverlayRemoveEvent) => void;
@@ -70,7 +74,9 @@ export function WhiteboardCanvas({
   overlayOpacityOverrides,
   overlayLockAspectRatios,
   loadingOverlayIds,
+  missingOverlayIds,
   backgroundConfig,
+  canvasSize,
   onAddDrawEvent,
   onAddEraseEvent,
   onRemoveOverlayEvent,
@@ -217,8 +223,40 @@ export function WhiteboardCanvas({
 
     // クリア
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = backgroundConfig?.color || '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (canvasSize) {
+      // 固定サイズ: 外側をグレー、キャンバス領域を背景色で塗る
+      ctx.fillStyle = '#e5e7eb';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.translate(transform.x, transform.y);
+      ctx.scale(transform.scale, transform.scale);
+
+      // キャンバス領域の影
+      ctx.shadowColor = 'rgba(0,0,0,0.15)';
+      ctx.shadowBlur = 12 / transform.scale;
+      ctx.shadowOffsetX = 2 / transform.scale;
+      ctx.shadowOffsetY = 2 / transform.scale;
+      ctx.fillStyle = backgroundConfig?.color || '#ffffff';
+      ctx.fillRect(0, 0, canvasSize.width, canvasSize.height);
+      ctx.shadowColor = 'transparent';
+
+      // パターンはキャンバス領域内のみ
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, canvasSize.width, canvasSize.height);
+      ctx.clip();
+      drawBackground(ctx, canvas.width / dpr, canvas.height / dpr, transform, backgroundConfig);
+      ctx.restore();
+
+      ctx.restore();
+    } else {
+      // 無限キャンバス: 全面を背景色で塗る
+      ctx.fillStyle = backgroundConfig?.color || '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
 
     // 変換適用
     ctx.save();
@@ -226,8 +264,10 @@ export function WhiteboardCanvas({
     ctx.translate(transform.x, transform.y);
     ctx.scale(transform.scale, transform.scale);
     
-    // 背景パターン描画
-    drawBackground(ctx, canvas.width / dpr, canvas.height / dpr, transform, backgroundConfig);
+    // 無限キャンバスの場合のみここでパターン描画（固定サイズは上で描画済み）
+    if (!canvasSize) {
+      drawBackground(ctx, canvas.width / dpr, canvas.height / dpr, transform, backgroundConfig);
+    }
 
     // オーバーレイ描画（ストロークより後ろ）
     for (const overlay of activeOverlays) {
@@ -272,13 +312,25 @@ export function WhiteboardCanvas({
           drawLoadingOverlay(ctx, displayX, displayY, displayWidth, displayHeight, transform.scale, true);
         }
       } else {
-        // 画像なし（初回読み込み or 再生成待ち）
-        ctx.fillStyle = '#e5e7eb';
+        const isMissing = missingOverlayIds?.has(overlay.overlayId) ?? false;
+        // プレースホルダー矩形
+        ctx.fillStyle = isMissing ? '#fef2f2' : '#e5e7eb';
         ctx.fillRect(displayX, displayY, displayWidth, displayHeight);
-        ctx.strokeStyle = '#9ca3af';
+        ctx.strokeStyle = isMissing ? '#f87171' : '#9ca3af';
         ctx.lineWidth = 1 / transform.scale;
         ctx.strokeRect(displayX, displayY, displayWidth, displayHeight);
-        drawLoadingOverlay(ctx, displayX, displayY, displayWidth, displayHeight, transform.scale, false);
+
+        if (isMissing) {
+          // "Asset not found" テキスト
+          const fontSize = Math.max(Math.min(displayWidth * 0.08, 14 / transform.scale), 8 / transform.scale);
+          ctx.font = `${fontSize}px sans-serif`;
+          ctx.fillStyle = '#dc2626';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('Asset not found', displayX + displayWidth / 2, displayY + displayHeight / 2);
+        } else {
+          drawLoadingOverlay(ctx, displayX, displayY, displayWidth, displayHeight, transform.scale, false);
+        }
       }
       
       // 選択枠を描画
@@ -333,6 +385,14 @@ export function WhiteboardCanvas({
       ctx.stroke();
     }
 
+    // 固定サイズキャンバスの枠線
+    if (canvasSize) {
+      ctx.strokeStyle = '#9ca3af';
+      ctx.lineWidth = 1 / transform.scale;
+      ctx.setLineDash([]);
+      ctx.strokeRect(0, 0, canvasSize.width, canvasSize.height);
+    }
+
     ctx.restore();
 
     // 他ユーザーのカーソル描画（変換後座標）
@@ -361,7 +421,7 @@ export function WhiteboardCanvas({
     }
     
     ctx.restore();
-  }, [activeStrokes, activeOverlays, overlayImages, overlayAssetTypes, overlayOpacityOverrides, loadingOverlayIds, selectedOverlayId, dragPreview, currentStroke, transform, cursors, drawLoadingOverlay, drawSpinner]);
+  }, [activeStrokes, activeOverlays, overlayImages, overlayAssetTypes, overlayOpacityOverrides, loadingOverlayIds, missingOverlayIds, selectedOverlayId, dragPreview, currentStroke, transform, cursors, drawLoadingOverlay, drawSpinner, canvasSize, backgroundConfig]);
 
   // 描画ループ
   useEffect(() => {
@@ -795,8 +855,8 @@ export function WhiteboardCanvas({
     onHideCursor();
   }, [onHideCursor]);
 
-  // ホイール（ズーム）
-  const handleWheel = useCallback((e: React.WheelEvent) => {
+  // ホイール（ズーム）— native listener で passive: false にするため useEffect で登録
+  const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
     const container = containerRef.current;
     if (!container) return;
@@ -815,6 +875,14 @@ export function WhiteboardCanvas({
 
     setTransform({ x: newX, y: newY, scale: newScale });
   }, [transform]);
+
+  // wheel イベントを non-passive で登録（React の onWheel は passive のため preventDefault 不可）
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
 
   // キーボードイベント（Delete でオーバーレイ削除）
   useEffect(() => {
@@ -886,7 +954,6 @@ export function WhiteboardCanvas({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerLeave}
-        onWheel={handleWheel}
         onDoubleClick={handleDoubleClick}
       />
     </div>

@@ -27,6 +27,7 @@ const KEYS = {
   assetFile: (uuid: string) => `asset:${uuid}:file`,
   boardEvents: (boardId: string) => `board:${boardId}:events`,
   boardSnapshot: (boardId: string) => `board:${boardId}:snapshot`,
+  boardThumbnail: (boardId: string) => `board:${boardId}:thumbnail`,
   boardUuids: () => 'project:boardUuids',
 };
 
@@ -79,6 +80,7 @@ export async function saveProjectConfig(config: ProjectConfig): Promise<void> {
       displayOrder: info.displayOrder,
       hostedBy: info.hostedBy,
       hostedSince: info.hostedSince,
+      ...(info.canvasWidth && info.canvasHeight ? { canvasWidth: info.canvasWidth, canvasHeight: info.canvasHeight } : {}),
     })),
     assets: Array.from(config.assets.values()),
   };
@@ -99,6 +101,7 @@ export async function loadProjectConfig(): Promise<ProjectConfig | null> {
       displayOrder: b.displayOrder,
       hostedBy: b.hostedBy,
       hostedSince: b.hostedSince,
+      ...(b.canvasWidth && b.canvasHeight ? { canvasWidth: b.canvasWidth, canvasHeight: b.canvasHeight } : {}),
     }])
   );
   
@@ -229,6 +232,7 @@ export async function clearAllData(): Promise<void> {
 export async function deleteBoardData(boardId: string): Promise<void> {
   await deleteBoardEvents(boardId);
   await deleteBoardSnapshot(boardId);
+  await deleteBoardThumbnail(boardId);
 }
 
 // ========================================
@@ -278,4 +282,26 @@ export async function loadAssetFileAsDataUrl(uuid: string): Promise<string | nul
     reader.onerror = () => resolve(null);
     reader.readAsDataURL(blob);
   });
+}
+
+// ========================================
+// サムネイル
+// ========================================
+
+/** サムネイル PNG を保存 */
+export async function saveBoardThumbnail(boardId: string, blob: Blob): Promise<void> {
+  const buf = await blob.arrayBuffer();
+  await set(KEYS.boardThumbnail(boardId), buf);
+}
+
+/** サムネイル PNG を取得 */
+export async function loadBoardThumbnail(boardId: string): Promise<Blob | null> {
+  const buf = await get<ArrayBuffer>(KEYS.boardThumbnail(boardId));
+  if (!buf) return null;
+  return new Blob([buf], { type: 'image/png' });
+}
+
+/** サムネイル PNG を削除 */
+export async function deleteBoardThumbnail(boardId: string): Promise<void> {
+  await del(KEYS.boardThumbnail(boardId));
 }

@@ -46,7 +46,7 @@ export function BoardEditor() {
   const { boardId } = useParams<{ boardId: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { project, getBoardUuid, getAssets, getBoards, onAssetAddedToBoard, onAssetRemovedFromBoard, importAsset, loadBoardEventsAsync } = useProjectStore();
+  const { project, getBoardUuid, getAssets, getBoards, onAssetAddedToBoard, onAssetRemovedFromBoard, importAsset, loadBoardEventsAsync, regenerateThumbnail, setBoardCanvasSize } = useProjectStore();
 
   // ツール状態
   const [tool, setTool] = useState<ToolType>('pen');
@@ -73,6 +73,8 @@ export function BoardEditor() {
   const [overlayLockAspectRatios, setOverlayLockAspectRatios] = useState<Map<string, boolean>>(new Map());
   /** 画像再生成中の overlayId セット（スピナー表示用） */
   const [loadingOverlayIds, setLoadingOverlayIds] = useState<Set<string>>(new Set());
+  /** アセットが見つからない overlayId セット（Missing Asset プレースホルダー用） */
+  const [missingOverlayIds, setMissingOverlayIds] = useState<Set<string>>(new Set());
   // インラインコントロールの位置計算用：transform をリアルタイムで反映（パン・ズーム追随）
   const [canvasTransformFull, setCanvasTransformFull] = useState<CanvasTransform>({ x: 0, y: 0, scale: 1 });
   // サムネイル再生成用：ズームティア変化時のみ更新
@@ -97,6 +99,14 @@ export function BoardEditor() {
   // ボード情報
   const boardInfo = boardId ? project?.config.boards.get(boardId) : undefined;
   const localBoardUuid = boardId ? getBoardUuid(boardId) : undefined;
+
+  // 固定キャンバスサイズ（undefined = 無限キャンバス）
+  const canvasSize = useMemo(() => {
+    if (boardInfo?.canvasWidth && boardInfo?.canvasHeight) {
+      return { width: boardInfo.canvasWidth, height: boardInfo.canvasHeight };
+    }
+    return undefined;
+  }, [boardInfo?.canvasWidth, boardInfo?.canvasHeight]);
   
   // 共有リンク判定
   const roomIdFromQuery = searchParams.get('room');
@@ -318,23 +328,42 @@ export function BoardEditor() {
       const ctx = thumbCanvas.getContext('2d')!;
 
       // 背景
-      ctx.fillStyle = '#f9fafb';
+      const bg = project?.config.background;
+      ctx.fillStyle = bg?.color || '#ffffff';
       ctx.fillRect(0, 0, thumbW, thumbH);
 
-      // グリッド
-      ctx.save();
-      ctx.scale(scale, scale);
-      ctx.translate(-minX, -minY);
-      const gridSize = 50;
-      ctx.strokeStyle = '#e5e7eb';
-      ctx.lineWidth = 1 / scale;
-      const gx0 = Math.floor(minX / gridSize) * gridSize;
-      const gy0 = Math.floor(minY / gridSize) * gridSize;
-      ctx.beginPath();
-      for (let x = gx0; x <= maxX; x += gridSize) { ctx.moveTo(x, minY); ctx.lineTo(x, maxY); }
-      for (let y = gy0; y <= maxY; y += gridSize) { ctx.moveTo(minX, y); ctx.lineTo(maxX, y); }
-      ctx.stroke();
-      ctx.restore();
+      // 背景パターン
+      const bgPattern = bg?.pattern || 'none';
+      if (bgPattern !== 'none') {
+        ctx.save();
+        ctx.scale(scale, scale);
+        ctx.translate(-minX, -minY);
+        const gridSize = bg?.patternSize || 20;
+        ctx.strokeStyle = bg?.patternColor || '#e0e0e0';
+        ctx.fillStyle = bg?.patternColor || '#e0e0e0';
+        ctx.lineWidth = 1 / scale;
+        const gx0 = Math.floor(minX / gridSize) * gridSize;
+        const gy0 = Math.floor(minY / gridSize) * gridSize;
+        if (bgPattern === 'grid' || bgPattern === 'lines') {
+          ctx.beginPath();
+          for (let y = gy0; y <= maxY; y += gridSize) { ctx.moveTo(minX, y); ctx.lineTo(maxX, y); }
+          if (bgPattern === 'grid') {
+            for (let x = gx0; x <= maxX; x += gridSize) { ctx.moveTo(x, minY); ctx.lineTo(x, maxY); }
+          }
+          ctx.stroke();
+        }
+        if (bgPattern === 'dots') {
+          const radius = Math.max(1 / scale, 0.8);
+          for (let x = gx0; x <= maxX; x += gridSize) {
+            for (let y = gy0; y <= maxY; y += gridSize) {
+              ctx.beginPath();
+              ctx.arc(x, y, radius, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+        }
+        ctx.restore();
+      }
 
       // サブオーバーレイのアセットタイプをマップで管理（描画時に board と非board を区別）
       const subAssetTypeMap = new Map<string, AssetType>();
@@ -420,6 +449,7 @@ export function BoardEditor() {
     const loadImages = async () => {
       const newImages = new Map<string, HTMLImageElement>(); // overlayId → image
       const missingUuids: string[] = [];
+      const newMissingOverlayIds = new Set<string>();
 
       for (const overlay of activeOverlays) {
         const asset = project?.assetIndex.byUuid.get(overlay.assetUuid);
@@ -453,6 +483,9 @@ export function BoardEditor() {
             { assetUuid: overlay.assetUuid, viewport: overlay.viewport, width: overlay.width, height: overlay.height, displayScale: canvasTransform.scale },
             0
           );
+          if (!img) {
+            newMissingOverlayIds.add(overlay.overlayId);
+          }
 
         } else if (assetType === 'document') {
           // P2P receivedAssets からも試みる
@@ -472,6 +505,7 @@ export function BoardEditor() {
             } catch { /* skip */ }
           } else {
             missingUuids.push(overlay.assetUuid);
+            newMissingOverlayIds.add(overlay.overlayId);
           }
 
         } else { // image
@@ -489,6 +523,7 @@ export function BoardEditor() {
               clearAssetRequest(overlay.assetUuid);
             } else {
               missingUuids.push(overlay.assetUuid);
+              newMissingOverlayIds.add(overlay.overlayId);
             }
           }
         }
@@ -503,6 +538,7 @@ export function BoardEditor() {
       for (const uuid of missingUuids) requestAsset(uuid);
 
       setOverlayImages(newImages);
+      setMissingOverlayIds(newMissingOverlayIds);
       // 再生成が完了した overlayId を loading から除外
       if (missingUuids.length === 0) {
         setLoadingOverlayIds((prev: Set<string>) => {
@@ -1237,10 +1273,12 @@ export function BoardEditor() {
       ];
       await saveBoardSnapshot(boardId, snapshotEvents);
       
+      // サムネイル再生成（非同期、エラーは無視）
+      try { await regenerateThumbnail(boardId); } catch { /* ignore */ }
     }
     
     navigate(isJoiningViaShareLink ? '/' : '/project');
-  }, [isHost, boardId, events, sessionId, activeStrokes, activeOverlays, navigate, isJoiningViaShareLink]);
+  }, [isHost, boardId, events, sessionId, activeStrokes, activeOverlays, navigate, isJoiningViaShareLink, regenerateThumbnail]);
 
   // ゲストがいる場合はスナップショットをクリア
   useEffect(() => {
@@ -1448,6 +1486,8 @@ export function BoardEditor() {
         onAddAsset={handleAddAsset}
         onImportFile={importAsset}
         availableAssets={availableAssets}
+        canvasSize={canvasSize}
+        onCanvasSizeChange={isHost && boardId ? (w, h) => setBoardCanvasSize(boardId, w, h) : undefined}
       />
       <main className={`canvas-container ${isHostPreparing ? 'preparing' : ''}`} style={{ position: 'relative' }}>
         <WhiteboardCanvas
@@ -1464,7 +1504,9 @@ export function BoardEditor() {
           overlayOpacityOverrides={overlayOpacityOverrides}
           overlayLockAspectRatios={overlayLockAspectRatios}
           loadingOverlayIds={loadingOverlayIds}
+          missingOverlayIds={missingOverlayIds}
           backgroundConfig={project?.config.background}
+          canvasSize={canvasSize}
           onAddDrawEvent={addDrawEvent}
           onAddEraseEvent={addEraseEvent}
           onRemoveOverlayEvent={handleRemoveOverlay}
