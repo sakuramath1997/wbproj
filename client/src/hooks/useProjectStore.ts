@@ -314,6 +314,14 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     if (!project) return null;
     
     try {
+      // エクスポート用にボードイベントを IndexedDB から最新を再取得
+      for (const boardId of project.config.boards.keys()) {
+        const events = await loadBoardEventsFromDB(boardId);
+        if (events && events.length > 0) {
+          project.boards.set(boardId, events);
+        }
+      }
+      
       // エクスポート用にアセットファイルを IndexedDB からロード
       for (const [uuid, asset] of project.assetIndex.byUuid) {
         if (asset.type !== 'board' && !project.assetFiles.has(uuid)) {
@@ -895,14 +903,11 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     // MIME タイプを判定
     const mimeType = file.type;
     let assetType: AssetType;
-    let category: string;
     
     if (mimeType.startsWith('image/')) {
       assetType = 'image';
-      category = 'images';
     } else if (mimeType === 'application/pdf') {
       assetType = 'document';
-      category = 'documents';
     } else {
       // サポートしていないファイルタイプ
       return null;
@@ -910,7 +915,9 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     
     // UUID を生成
     const uuid = generateUuid();
-    const relativePath = `imported/${category}/${file.name}`;
+    // wbproj-spec-v3: assets/<uuid>.<ext> フラット構造
+    const ext = file.name.includes('.') ? file.name.split('.').pop() : 'bin';
+    const relativePath = `assets/${uuid}.${ext}`;
     
     // ファイルを読み込み
     const arrayBuffer = await file.arrayBuffer();

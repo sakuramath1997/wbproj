@@ -176,11 +176,15 @@ export async function loadProject(file: File): Promise<Project> {
   }
 
   // アセットファイル（画像・PDF等）を読み込み
+  // wbproj-spec-v3: assets/<uuid>.<ext> フラット構造
+  // v1 互換: imported/images/..., imported/documents/... もフォールバック検索
   const assetFiles = new Map<string, { data: ArrayBuffer; mimeType: string; fileName: string }>();
   for (const [uuid, assetInfo] of config.assets) {
     const asset = assetIndex.byUuid.get(uuid);
     const relativePath = asset?.relativePath || `assets/${uuid}`;
-    const assetFile = zip.file(relativePath);
+    const assetFile = zip.file(relativePath)
+      || zip.file(`assets/${uuid}`)  // relative_path にファイル名がない場合
+      || null;
     if (assetFile) {
       const data = await assetFile.async('arraybuffer');
       assetFiles.set(uuid, {
@@ -240,16 +244,14 @@ export async function saveProject(project: Project): Promise<Blob> {
     wbassetFolder?.file(`${uuid}.wbasset`, wbassetToToml(asset));
   }
 
-  // assets/ バイナリ
-  if (project.assetFiles.size > 0) {
-    const assetsFolder = zip.folder('assets');
-    for (const [uuid, file] of project.assetFiles) {
-      const asset = project.assetIndex.byUuid.get(uuid);
-      if (asset && asset.type !== 'board') {
-        // relative_path から assets/ 以降のファイル名を取得
-        const fileName = asset.relativePath.replace(/^assets\//, '');
-        assetsFolder?.file(fileName, file.data);
-      }
+  // assets/ バイナリ — wbproj-spec-v3: assets/<uuid>.<ext> フラット構造
+  const assetsFolder = zip.folder('assets');
+  for (const [uuid, file] of project.assetFiles) {
+    const asset = project.assetIndex.byUuid.get(uuid);
+    if (asset && asset.type !== 'board') {
+      // relative_path は "assets/<uuid>.<ext>" 形式 → assets/ 以降を取得
+      const fileName = asset.relativePath.replace(/^assets\//, '');
+      assetsFolder?.file(fileName, file.data);
     }
   }
 
