@@ -210,8 +210,20 @@ export type OverlayOperation =
   | OverlayViewportOperation
   | OverlayStyleOperation;
 
-/** 全操作記録（ストローク + オーバーレイ） */
-export type Operation = StrokeOperation | OverlayOperation;
+// ========================================
+// 投げ縄 Undo/Redo 操作記録
+// ========================================
+
+/** 投げ縄移動の操作記録 */
+export interface LassoMoveOperation {
+  type: 'lassoMove';
+  eraseId: string;                // 元ストローク消去の E イベント ID
+  originalStrokes: DrawEvent[];   // 移動前ストローク（復元用）
+  newStrokes: DrawEvent[];        // 移動後ストローク（Redo 用）
+}
+
+/** 全操作記録（ストローク + オーバーレイ + 投げ縄） */
+export type Operation = StrokeOperation | OverlayOperation | LassoMoveOperation;
 
 // ========================================
 // 拡張ホワイトボード状態

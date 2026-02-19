@@ -20,6 +20,8 @@ export const DEFAULT_CORNER_DETECTION_CONFIG: CornerDetectionConfig = {
   usePressure: false,          // 筆圧は環境依存なのでデフォルトOFF
   pressureThreshold: 0.2,
   minCornerDistance: 5,        // コーナー間は最低5点
+  useCurvature: true,          // 曲率ベース検出ON
+  curvatureThreshold: 0.6,     // 曲率ピーク閾値
 };
 
 /** デフォルトのフィッティング設定 */
@@ -36,9 +38,10 @@ export const DEFAULT_CONFIG: CurveFittingConfig = {
 };
 
 /**
- * プリセット: 手書き文字向け
- * - コーナー検出を厳しめに
- * - 速度ベース検出ON
+ * プリセット: 手書き文字向け（漢字・数式）
+ * - 曲率ベース検出ON（折れ・はね）
+ * - 角度閾値を低めに
+ * - コーナー間隔を短く（画数の多い文字に対応）
  */
 export const PRESET_HANDWRITING: CurveFittingConfig = {
   preprocess: {
@@ -54,6 +57,8 @@ export const PRESET_HANDWRITING: CurveFittingConfig = {
     usePressure: false,
     pressureThreshold: 0.2,
     minCornerDistance: 3,       // 文字は細かい角が多い
+    useCurvature: true,
+    curvatureThreshold: 0.4,   // 鋭敏に曲率変化を検出
   },
   fitting: {
     tolerance: 1.5,             // より精密に
@@ -80,6 +85,8 @@ export const PRESET_FREEHAND: CurveFittingConfig = {
     usePressure: false,
     pressureThreshold: 0.2,
     minCornerDistance: 8,
+    useCurvature: true,
+    curvatureThreshold: 0.8,   // 高め（鈍感、滑らか重視）
   },
   fitting: {
     tolerance: 2.5,
@@ -106,9 +113,11 @@ export const PRESET_DIAGRAM: CurveFittingConfig = {
     usePressure: false,
     pressureThreshold: 0.2,
     minCornerDistance: 4,
+    useCurvature: true,
+    curvatureThreshold: 0.5,
   },
   fitting: {
-    tolerance: 3.0,             // 多少の誤差は許容
+    tolerance: 3.0,
     maxIterations: 3,
   },
 };

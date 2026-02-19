@@ -1,5 +1,9 @@
 /**
  * 曲線フィッティング - 型定義
+ * 
+ * パイプラインアーキテクチャ:
+ *   入力点列 → [前処理ステージ] → [コーナー検出ステージ] → [フィッティングステージ] → [後処理ステージ] → SVG パス
+ *   各ステージは PipelineStage<I,O> を実装し、差し替え・追加が可能
  */
 
 /** 入力点（タイムスタンプ・筆圧付き） */
@@ -30,6 +34,7 @@ export interface Corner {
   point: InputPoint;    // コーナーの座標
   angle: number;        // 角度（ラジアン）
   confidence: number;   // 信頼度 (0.0 - 1.0)
+  source?: string;      // 検出元（'angle' | 'curvature' | 'velocity' | 'pressure'）
 }
 
 /** セグメント（コーナー間の点列） */
@@ -37,6 +42,21 @@ export interface Segment {
   points: InputPoint[];
   startCorner?: Corner;
   endCorner?: Corner;
+}
+
+// ========================================
+// パイプラインステージ
+// ========================================
+
+/**
+ * パイプラインステージの基本インターフェース
+ * 各ステージは PipelineContext を受け取り、変更して返す
+ */
+export interface PipelineStage {
+  /** ステージ名（デバッグ・ログ用） */
+  readonly name: string;
+  /** ステージの処理を実行 */
+  process(ctx: PipelineContext, config: CurveFittingConfig): PipelineContext;
 }
 
 /** パイプラインの中間結果 */
@@ -51,7 +71,13 @@ export interface PipelineContext {
   segments: Segment[];
   /** フィッティング結果 */
   bezierSegments: BezierSegment[];
+  /** ステージ間のメタデータ（拡張用） */
+  meta: Record<string, unknown>;
 }
+
+// ========================================
+// 個別コンポーネントのインターフェース
+// ========================================
 
 /** コーナー検出器のインターフェース */
 export interface CornerDetector {
@@ -64,6 +90,10 @@ export interface BezierFitter {
   name: string;
   fit(points: InputPoint[], config: FittingConfig): BezierSegment[];
 }
+
+// ========================================
+// 設定の型定義
+// ========================================
 
 /** コーナー検出の設定 */
 export interface CornerDetectionConfig {
@@ -81,6 +111,10 @@ export interface CornerDetectionConfig {
   pressureThreshold: number;
   /** コーナー同士の最小間隔（点数） */
   minCornerDistance: number;
+  /** 曲率ベース検出を有効にするか */
+  useCurvature: boolean;
+  /** 曲率ピークの閾値（高いほど鈍感） */
+  curvatureThreshold: number;
 }
 
 /** フィッティングの設定 */

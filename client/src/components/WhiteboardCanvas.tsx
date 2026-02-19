@@ -24,7 +24,14 @@ import {
 } from '../utils';
 
 // ドラッグ状態の型
-type DragMode = 'none' | 'move' | 'resize-nw' | 'resize-ne' | 'resize-se' | 'resize-sw';
+type DragMode = 'none' | 'move'
+  | 'resize-nw' | 'resize-ne' | 'resize-se' | 'resize-sw'
+  | 'resize-n' | 'resize-s' | 'resize-e' | 'resize-w';
+
+// 投げ縄リサイズモード
+type LassoResizeMode = 'none' | 'move'
+  | 'resize-nw' | 'resize-ne' | 'resize-se' | 'resize-sw'  // 四隅: AR 保持
+  | 'resize-n' | 'resize-s' | 'resize-e' | 'resize-w';      // 辺中央: 単軸
 
 interface WhiteboardCanvasProps {
   activeStrokes: DrawEvent[];
@@ -58,6 +65,10 @@ interface WhiteboardCanvasProps {
   onUpdateCursor: (x: number, y: number) => void;
   onHideCursor: () => void;
   onTransformChange?: (transform: CanvasTransform) => void;
+  /** 投げ縄: ストローク移動（元ストローク群, 移動後ストローク群） */
+  onLassoMove?: (originalStrokes: DrawEvent[], movedStrokes: DrawEvent[]) => void;
+  /** 投げ縄: ストローク削除 */
+  onLassoDelete?: (strokes: DrawEvent[]) => void;
 }
 
 export function WhiteboardCanvas({
@@ -86,6 +97,8 @@ export function WhiteboardCanvas({
   onUpdateCursor,
   onHideCursor,
   onTransformChange,
+  onLassoMove,
+  onLassoDelete,
 }: WhiteboardCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -107,6 +120,31 @@ export function WhiteboardCanvas({
   const dragOverlayInitialRef = useRef<{ x: number; y: number; width: number; height: number; rotation: number } | null>(null);
   const [dragPreview, setDragPreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [shiftPressed, setShiftPressed] = useState(false);
+
+  // 投げ縄
+  const lassoPathRef = useRef<Point[]>([]);
+  const [lassoPath, setLassoPath] = useState<Point[]>([]);
+  const [lassoSelectedIds, setLassoSelectedIds] = useState<Set<string>>(new Set());
+  const lassoDragStartRef = useRef<Point | null>(null);
+  const [lassoDragOffset, setLassoDragOffset] = useState<Point | null>(null);
+  // 投げ縄リサイズ
+  const lassoResizeModeRef = useRef<LassoResizeMode>('none');
+  const lassoInitialBboxRef = useRef<[number, number, number, number] | null>(null); // [minX, minY, maxX, maxY]
+  const [lassoScalePreview, setLassoScalePreview] = useState<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+
+  // 投げ縄: ツール切替時に選択・パスをクリア
+  useEffect(() => {
+    if (tool !== 'lasso') {
+      setLassoSelectedIds(new Set());
+      setLassoPath([]);
+      lassoPathRef.current = [];
+      lassoDragStartRef.current = null;
+      setLassoDragOffset(null);
+      lassoResizeModeRef.current = 'none';
+      lassoInitialBboxRef.current = null;
+      setLassoScalePreview(null);
+    }
+  }, [tool]);
 
   // Shift キー監視
   // transform 変化を親に通知（ボードサムネイル解像度更新用）
@@ -341,23 +379,11 @@ export function WhiteboardCanvas({
         ctx.strokeRect(displayX, displayY, displayWidth, displayHeight);
         ctx.setLineDash([]);
         
-        // 選択ハンドル
-        const handleSize = 8 / transform.scale;
-        ctx.fillStyle = '#3b82f6';
-        const corners = [
-          { x: displayX, y: displayY },
-          { x: displayX + displayWidth, y: displayY },
-          { x: displayX + displayWidth, y: displayY + displayHeight },
-          { x: displayX, y: displayY + displayHeight },
-        ];
-        for (const corner of corners) {
-          ctx.fillRect(
-            corner.x - handleSize / 2,
-            corner.y - handleSize / 2,
-            handleSize,
-            handleSize
-          );
-        }
+        // 8 ハンドル
+        const hs = 4 / transform.scale;        const hmx = displayX + displayWidth / 2;
+        const hmy = displayY + displayHeight / 2;
+        drawResizeHandles(ctx, transform.scale, hs,
+          displayX, displayY, displayX + displayWidth, displayY + displayHeight, hmx, hmy);
       }
       
       ctx.restore();
@@ -383,6 +409,103 @@ export function WhiteboardCanvas({
         ctx.lineTo(currentStroke.points[i].x, currentStroke.points[i].y);
       }
       ctx.stroke();
+    }
+
+    // 投げ縄: 選択ストロークのハイライト
+    if (lassoSelectedIds.size > 0) {
+      const dx = lassoDragOffset?.x ?? 0;
+      const dy = lassoDragOffset?.y ?? 0;
+      const sp = lassoScalePreview; // { sx, sy, ox, oy } | null
+      const isTransforming = (dx !== 0 || dy !== 0 || sp !== null);
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      // 元位置の bbox（ハンドル配置用）
+      let bMinX = Infinity, bMinY = Infinity, bMaxX = -Infinity, bMaxY = -Infinity;
+      for (const stroke of activeStrokes) {
+        if (!lassoSelectedIds.has(stroke.id)) continue;
+        if (stroke.bbox) {
+          bMinX = Math.min(bMinX, stroke.bbox[0]);
+          bMinY = Math.min(bMinY, stroke.bbox[1]);
+          bMaxX = Math.max(bMaxX, stroke.bbox[2]);
+          bMaxY = Math.max(bMaxY, stroke.bbox[3]);
+        }
+      }
+
+      // ストローク描画（移動/スケール適用）
+      for (const stroke of activeStrokes) {
+        if (!lassoSelectedIds.has(stroke.id)) continue;
+        ctx.save();
+        ctx.globalAlpha = isTransforming ? 0.6 : 1;
+        if (sp) {
+          ctx.translate(sp.ox, sp.oy);
+          ctx.scale(sp.sx, sp.sy);
+          ctx.translate(-sp.ox, -sp.oy);
+          ctx.lineWidth = stroke.width * Math.min(sp.sx, sp.sy);
+        } else {
+          if (dx !== 0 || dy !== 0) ctx.translate(dx, dy);
+          ctx.lineWidth = stroke.width;
+        }
+        ctx.strokeStyle = stroke.color;
+        ctx.stroke(new Path2D(stroke.path));
+        // ブルーハロ
+        ctx.strokeStyle = 'rgba(59, 130, 246, 0.4)';
+        ctx.lineWidth = (sp ? stroke.width * Math.min(sp.sx, sp.sy) : stroke.width) + 4 / transform.scale;
+        ctx.stroke(new Path2D(stroke.path));
+        ctx.restore();
+      }
+
+      // バウンディングボックス + ハンドル描画
+      if (bMinX !== Infinity) {
+        const pad = 6 / transform.scale;
+
+        // 変換後の bbox を計算
+        let dbx0: number, dby0: number, dbx1: number, dby1: number;
+        if (sp) {
+          dbx0 = sp.ox + (bMinX - sp.ox) * sp.sx;
+          dby0 = sp.oy + (bMinY - sp.oy) * sp.sy;
+          dbx1 = sp.ox + (bMaxX - sp.ox) * sp.sx;
+          dby1 = sp.oy + (bMaxY - sp.oy) * sp.sy;
+        } else {
+          dbx0 = bMinX + dx; dby0 = bMinY + dy;
+          dbx1 = bMaxX + dx; dby1 = bMaxY + dy;
+        }
+        const rx = dbx0 - pad, ry = dby0 - pad;
+        const rw = dbx1 - dbx0 + pad * 2, rh = dby1 - dby0 + pad * 2;
+
+        // 破線ボックス
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 1.5 / transform.scale;
+        ctx.setLineDash([6 / transform.scale, 4 / transform.scale]);
+        ctx.strokeRect(rx, ry, rw, rh);
+        ctx.setLineDash([]);
+
+        // 8 ハンドル（共通関数）
+        const hs = 4 / transform.scale;
+        const midX = rx + rw / 2, midY = ry + rh / 2;
+        drawResizeHandles(ctx, transform.scale, hs, rx, ry, rx + rw, ry + rh, midX, midY);
+      }
+      ctx.restore();
+    }
+
+    // 投げ縄: パス描画中
+    if (lassoPath.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = 1.5 / transform.scale;
+      ctx.setLineDash([5 / transform.scale, 5 / transform.scale]);
+      ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
+      ctx.beginPath();
+      ctx.moveTo(lassoPath[0].x, lassoPath[0].y);
+      for (let i = 1; i < lassoPath.length; i++) {
+        ctx.lineTo(lassoPath[i].x, lassoPath[i].y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
     }
 
     // 固定サイズキャンバスの枠線
@@ -421,7 +544,7 @@ export function WhiteboardCanvas({
     }
     
     ctx.restore();
-  }, [activeStrokes, activeOverlays, overlayImages, overlayAssetTypes, overlayOpacityOverrides, loadingOverlayIds, missingOverlayIds, selectedOverlayId, dragPreview, currentStroke, transform, cursors, drawLoadingOverlay, drawSpinner, canvasSize, backgroundConfig]);
+  }, [activeStrokes, activeOverlays, overlayImages, overlayAssetTypes, overlayOpacityOverrides, loadingOverlayIds, missingOverlayIds, selectedOverlayId, dragPreview, currentStroke, transform, cursors, drawLoadingOverlay, drawSpinner, canvasSize, backgroundConfig, lassoPath, lassoSelectedIds, lassoDragOffset, lassoScalePreview]);
 
   // 描画ループ
   useEffect(() => {
@@ -529,20 +652,25 @@ export function WhiteboardCanvas({
         const selectedOverlay = activeOverlays.find(o => o.overlayId === selectedOverlayId);
         if (selectedOverlay) {
           const handleSize = 12 / transform.scale;
-          const corners = [
-            { mode: 'resize-nw' as DragMode, x: selectedOverlay.x, y: selectedOverlay.y },
-            { mode: 'resize-ne' as DragMode, x: selectedOverlay.x + selectedOverlay.width, y: selectedOverlay.y },
-            { mode: 'resize-se' as DragMode, x: selectedOverlay.x + selectedOverlay.width, y: selectedOverlay.y + selectedOverlay.height },
-            { mode: 'resize-sw' as DragMode, x: selectedOverlay.x, y: selectedOverlay.y + selectedOverlay.height },
+          const midX = selectedOverlay.x + selectedOverlay.width / 2;
+          const midY = selectedOverlay.y + selectedOverlay.height / 2;
+          const handles: { mode: DragMode; hx: number; hy: number }[] = [
+            { mode: 'resize-nw', hx: selectedOverlay.x, hy: selectedOverlay.y },
+            { mode: 'resize-ne', hx: selectedOverlay.x + selectedOverlay.width, hy: selectedOverlay.y },
+            { mode: 'resize-se', hx: selectedOverlay.x + selectedOverlay.width, hy: selectedOverlay.y + selectedOverlay.height },
+            { mode: 'resize-sw', hx: selectedOverlay.x, hy: selectedOverlay.y + selectedOverlay.height },
+            { mode: 'resize-n', hx: midX, hy: selectedOverlay.y },
+            { mode: 'resize-s', hx: midX, hy: selectedOverlay.y + selectedOverlay.height },
+            { mode: 'resize-w', hx: selectedOverlay.x, hy: midY },
+            { mode: 'resize-e', hx: selectedOverlay.x + selectedOverlay.width, hy: midY },
           ];
           
-          for (const corner of corners) {
+          for (const handle of handles) {
             if (
-              Math.abs(point.x - corner.x) < handleSize &&
-              Math.abs(point.y - corner.y) < handleSize
+              Math.abs(point.x - handle.hx) < handleSize &&
+              Math.abs(point.y - handle.hy) < handleSize
             ) {
-              // リサイズ開始
-              dragModeRef.current = corner.mode;
+              dragModeRef.current = handle.mode;
               dragStartRef.current = point;
               dragOverlayInitialRef.current = {
                 x: selectedOverlay.x,
@@ -608,7 +736,62 @@ export function WhiteboardCanvas({
     if (tool === 'eraser') {
       eraseAtPoint(point);
     }
-  }, [tool, color, strokeWidth, screenToCanvas, eraseAtPoint, activeOverlays, selectedOverlayId, transform.scale, onSelectOverlay]);
+
+    if (tool === 'lasso') {
+      // 選択済みストロークがある場合
+      if (lassoSelectedIds.size > 0) {
+        const selStrokes = activeStrokes.filter(s => lassoSelectedIds.has(s.id));
+        let bMinX = Infinity, bMinY = Infinity, bMaxX = -Infinity, bMaxY = -Infinity;
+        for (const s of selStrokes) {
+          if (s.bbox) {
+            bMinX = Math.min(bMinX, s.bbox[0]); bMinY = Math.min(bMinY, s.bbox[1]);
+            bMaxX = Math.max(bMaxX, s.bbox[2]); bMaxY = Math.max(bMaxY, s.bbox[3]);
+          }
+        }
+        if (bMinX !== Infinity) {
+          const pad = 6 / transform.scale;
+          const bx0 = bMinX - pad, by0 = bMinY - pad;
+          const bx1 = bMaxX + pad, by1 = bMaxY + pad;
+          const handleHit = 12 / transform.scale;
+          const midX = (bx0 + bx1) / 2, midY = (by0 + by1) / 2;
+
+          // 8 ハンドルの判定
+          const handles: { mode: LassoResizeMode; hx: number; hy: number }[] = [
+            { mode: 'resize-nw', hx: bx0, hy: by0 },
+            { mode: 'resize-ne', hx: bx1, hy: by0 },
+            { mode: 'resize-se', hx: bx1, hy: by1 },
+            { mode: 'resize-sw', hx: bx0, hy: by1 },
+            { mode: 'resize-n',  hx: midX, hy: by0 },
+            { mode: 'resize-s',  hx: midX, hy: by1 },
+            { mode: 'resize-w',  hx: bx0, hy: midY },
+            { mode: 'resize-e',  hx: bx1, hy: midY },
+          ];
+          for (const h of handles) {
+            if (Math.abs(point.x - h.hx) < handleHit && Math.abs(point.y - h.hy) < handleHit) {
+              lassoResizeModeRef.current = h.mode;
+              lassoDragStartRef.current = point;
+              lassoInitialBboxRef.current = [bMinX, bMinY, bMaxX, bMaxY];
+              return;
+            }
+          }
+
+          // bbox 内クリック → 移動
+          if (point.x >= bx0 && point.x <= bx1 && point.y >= by0 && point.y <= by1) {
+            lassoResizeModeRef.current = 'move';
+            lassoDragStartRef.current = point;
+            lassoInitialBboxRef.current = [bMinX, bMinY, bMaxX, bMaxY];
+            return;
+          }
+        }
+        // bbox 外クリック → 選択解除して新規投げ縄開始
+        setLassoSelectedIds(new Set());
+        setLassoScalePreview(null);
+      }
+      // 投げ縄パス描画開始
+      lassoPathRef.current = [point];
+      setLassoPath([point]);
+    }
+  }, [tool, color, strokeWidth, screenToCanvas, eraseAtPoint, activeOverlays, activeStrokes, selectedOverlayId, transform.scale, onSelectOverlay, lassoSelectedIds]);
 
   // ポインタ移動
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
@@ -725,24 +908,39 @@ export function WhiteboardCanvas({
               newHeight = newWidth / aspectRatio;
             }
             break;
+          // 辺中央: 単軸のみ変更（AR ロック無視）
+          case 'resize-n':
+            newY = initial.y + dy;
+            newHeight = initial.height - dy;
+            break;
+          case 'resize-s':
+            newHeight = initial.height + dy;
+            break;
+          case 'resize-e':
+            newWidth = initial.width + dx;
+            break;
+          case 'resize-w':
+            newX = initial.x + dx;
+            newWidth = initial.width - dx;
+            break;
         }
         
         // 最小サイズを保証
         if (newWidth < 20) {
-          if (dragModeRef.current === 'resize-nw' || dragModeRef.current === 'resize-sw') {
+          if (dragModeRef.current === 'resize-nw' || dragModeRef.current === 'resize-sw' || dragModeRef.current === 'resize-w') {
             newX = initial.x + initial.width - 20;
           }
           newWidth = 20;
-          if (lockAR) {
+          if (lockAR && dragModeRef.current !== 'resize-w') {
             newHeight = newWidth / aspectRatio;
           }
         }
         if (newHeight < 20) {
-          if (dragModeRef.current === 'resize-nw' || dragModeRef.current === 'resize-ne') {
+          if (dragModeRef.current === 'resize-nw' || dragModeRef.current === 'resize-ne' || dragModeRef.current === 'resize-n') {
             newY = initial.y + initial.height - 20;
           }
           newHeight = 20;
-          if (lockAR) {
+          if (lockAR && dragModeRef.current !== 'resize-n') {
             newWidth = newHeight * aspectRatio;
           }
         }
@@ -764,7 +962,63 @@ export function WhiteboardCanvas({
     if (tool === 'eraser' && e.buttons > 0) {
       eraseAtPoint(point);
     }
-  }, [tool, screenToCanvas, eraseAtPoint, onUpdateCursor, transform]);
+
+    if (tool === 'lasso') {
+      if (lassoDragStartRef.current && e.buttons > 0 && lassoInitialBboxRef.current) {
+        const mode = lassoResizeModeRef.current;
+        const dx = point.x - lassoDragStartRef.current.x;
+        const dy = point.y - lassoDragStartRef.current.y;
+
+        if (mode === 'move') {
+          setLassoDragOffset({ x: dx, y: dy });
+          setLassoScalePreview(null);
+        } else if (mode !== 'none') {
+          // リサイズ: bbox からスケール係数を計算
+          const [bMinX, bMinY, bMaxX, bMaxY] = lassoInitialBboxRef.current;
+          const bw = bMaxX - bMinX;
+          const bh = bMaxY - bMinY;
+          if (bw < 1 || bh < 1) return;
+
+          let sx = 1, sy = 1, ox = bMinX, oy = bMinY;
+
+          switch (mode) {
+            // 四隅: AR 保持
+            case 'resize-se': {
+              const s = Math.max(0.05, (bw + dx) / bw);
+              sx = sy = s; ox = bMinX; oy = bMinY;
+              break;
+            }
+            case 'resize-sw': {
+              const s = Math.max(0.05, (bw - dx) / bw);
+              sx = sy = s; ox = bMaxX; oy = bMinY;
+              break;
+            }
+            case 'resize-ne': {
+              const s = Math.max(0.05, (bw + dx) / bw);
+              sx = sy = s; ox = bMinX; oy = bMaxY;
+              break;
+            }
+            case 'resize-nw': {
+              const s = Math.max(0.05, (bw - dx) / bw);
+              sx = sy = s; ox = bMaxX; oy = bMaxY;
+              break;
+            }
+            // 辺中央: 単軸
+            case 'resize-e': { sx = Math.max(0.05, (bw + dx) / bw); ox = bMinX; oy = bMinY; break; }
+            case 'resize-w': { sx = Math.max(0.05, (bw - dx) / bw); ox = bMaxX; oy = bMinY; break; }
+            case 'resize-s': { sy = Math.max(0.05, (bh + dy) / bh); ox = bMinX; oy = bMinY; break; }
+            case 'resize-n': { sy = Math.max(0.05, (bh - dy) / bh); ox = bMinX; oy = bMaxY; break; }
+          }
+          setLassoScalePreview({ sx, sy, ox, oy });
+          setLassoDragOffset(null);
+        }
+      } else if (lassoPathRef.current.length > 0 && e.buttons > 0) {
+        // 投げ縄パス描画中
+        lassoPathRef.current.push(point);
+        setLassoPath([...lassoPathRef.current]);
+      }
+    }
+  }, [tool, screenToCanvas, eraseAtPoint, onUpdateCursor, transform, selectedOverlayId, shiftPressed, overlayLockAspectRatios]);
 
   // ポインタアップ
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
@@ -843,7 +1097,78 @@ export function WhiteboardCanvas({
       activeStrokeRef.current = null;
       setCurrentStroke(null);
     }
-  }, [tool, sessionId, selectedOverlayId, activeOverlays, dragPreview, onAddDrawEvent, onTransformOverlay]);
+
+    if (tool === 'lasso') {
+      const mode = lassoResizeModeRef.current;
+      if (lassoDragStartRef.current && lassoSelectedIds.size > 0 && mode !== 'none') {
+        const originals = activeStrokes.filter(s => lassoSelectedIds.has(s.id));
+
+        if (mode === 'move' && lassoDragOffset) {
+          // 移動コミット
+          const dx = lassoDragOffset.x;
+          const dy = lassoDragOffset.y;
+          if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+            const moved = originals.map(s => ({
+              ...s,
+              id: generateStrokeId(),
+              timestamp: getTimestamp(),
+              sessionId,
+              path: offsetSvgPath(s.path, dx, dy),
+              bbox: s.bbox ? [s.bbox[0] + dx, s.bbox[1] + dy, s.bbox[2] + dx, s.bbox[3] + dy] as [number, number, number, number] : s.bbox,
+            }));
+            onLassoMove?.(originals, moved);
+            setLassoSelectedIds(new Set(moved.map(s => s.id)));
+          }
+        } else if (lassoScalePreview) {
+          // リサイズコミット
+          const { sx, sy, ox, oy } = lassoScalePreview;
+          if (Math.abs(sx - 1) > 0.001 || Math.abs(sy - 1) > 0.001) {
+            const scaled = originals.map(s => ({
+              ...s,
+              id: generateStrokeId(),
+              timestamp: getTimestamp(),
+              sessionId,
+              path: scaleSvgPath(s.path, sx, sy, ox, oy),
+              width: s.width * Math.min(sx, sy),
+              bbox: s.bbox ? [
+                ox + (s.bbox[0] - ox) * sx,
+                oy + (s.bbox[1] - oy) * sy,
+                ox + (s.bbox[2] - ox) * sx,
+                oy + (s.bbox[3] - oy) * sy,
+              ] as [number, number, number, number] : s.bbox,
+            }));
+            onLassoMove?.(originals, scaled);
+            setLassoSelectedIds(new Set(scaled.map(s => s.id)));
+          }
+        }
+
+        lassoResizeModeRef.current = 'none';
+        lassoDragStartRef.current = null;
+        lassoInitialBboxRef.current = null;
+        setLassoDragOffset(null);
+        setLassoScalePreview(null);
+      } else if (lassoPathRef.current.length >= 3) {
+        // 投げ縄パスを閉じて選択判定
+        const polygon = lassoPathRef.current;
+        const selected = new Set<string>();
+        for (const stroke of activeStrokes) {
+          if (stroke.bbox) {
+            const cx = (stroke.bbox[0] + stroke.bbox[2]) / 2;
+            const cy = (stroke.bbox[1] + stroke.bbox[3]) / 2;
+            if (pointInPolygon(cx, cy, polygon)) {
+              selected.add(stroke.id);
+            }
+          }
+        }
+        setLassoSelectedIds(selected);
+        lassoPathRef.current = [];
+        setLassoPath([]);
+      } else {
+        lassoPathRef.current = [];
+        setLassoPath([]);
+      }
+    }
+  }, [tool, sessionId, selectedOverlayId, activeOverlays, activeStrokes, dragPreview, onAddDrawEvent, onTransformOverlay, lassoSelectedIds, lassoDragOffset, lassoScalePreview, onLassoMove]);
 
   // ポインタ離脱
   const handlePointerLeave = useCallback((e: React.PointerEvent) => {
@@ -899,15 +1224,25 @@ export function WhiteboardCanvas({
           onRemoveOverlayEvent(removeEvent);
           onSelectOverlay(null);
         }
+        if (lassoSelectedIds.size > 0 && onLassoDelete) {
+          const toDelete = activeStrokes.filter(s => lassoSelectedIds.has(s.id));
+          if (toDelete.length > 0) {
+            onLassoDelete(toDelete);
+            setLassoSelectedIds(new Set());
+          }
+        }
       }
       if (e.key === 'Escape') {
         onSelectOverlay(null);
+        setLassoSelectedIds(new Set());
+        setLassoPath([]);
+        lassoPathRef.current = [];
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedOverlayId, sessionId, onRemoveOverlayEvent, onSelectOverlay]);
+  }, [selectedOverlayId, sessionId, onRemoveOverlayEvent, onSelectOverlay, lassoSelectedIds, activeStrokes, onLassoDelete]);
 
   // ダブルクリックでオーバーレイを編集
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
@@ -970,8 +1305,92 @@ function getCursor(tool: ToolType): string {
     case 'eraser': return 'pointer';
     case 'pan': return 'grab';
     case 'select': return 'default';
+    case 'lasso': return 'crosshair';
     default: return 'default';
   }
+}
+
+/**
+ * 点が多角形の内部にあるかを判定（ray casting）
+ */
+function pointInPolygon(px: number, py: number, polygon: Point[]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x, yi = polygon[i].y;
+    const xj = polygon[j].x, yj = polygon[j].y;
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/**
+ * SVG パス文字列を (dx, dy) だけ平行移動する。
+ * fitCurveToSvgPath が生成する M/C 絶対座標パスを想定。
+ */
+function offsetSvgPath(path: string, dx: number, dy: number): string {
+  // 数値をすべてマッチし、x,y ペアずつオフセット
+  let idx = 0;
+  return path.replace(/-?[\d.]+/g, (match) => {
+    const val = parseFloat(match);
+    const isX = idx % 2 === 0;
+    idx++;
+    return String(Math.round((val + (isX ? dx : dy)) * 100) / 100);
+  });
+}
+
+/**
+ * SVG パス文字列を原点 (ox, oy) 基準で (sx, sy) スケールする。
+ * fitCurveToSvgPath が生成する M/C 絶対座標パスを想定。
+ */
+function scaleSvgPath(path: string, sx: number, sy: number, ox: number, oy: number): string {
+  let idx = 0;
+  return path.replace(/-?[\d.]+/g, (match) => {
+    const val = parseFloat(match);
+    const isX = idx % 2 === 0;
+    idx++;
+    if (isX) {
+      return String(Math.round((ox + (val - ox) * sx) * 100) / 100);
+    } else {
+      return String(Math.round((oy + (val - oy) * sy) * 100) / 100);
+    }
+  });
+}
+
+/**
+ * 8 つのリサイズハンドルを描画する（overlay select / lasso 共通）
+ * 四隅: 白塗り正方形 + 青枠、辺中央: 白塗り長方形 + 青枠
+ */
+function drawResizeHandles(
+  ctx: CanvasRenderingContext2D,
+  scale: number,
+  hs: number,
+  x0: number, y0: number, x1: number, y1: number,
+  midX: number, midY: number,
+) {
+  const blue = '#3b82f6';
+
+  // 四隅: 青塗り正方形
+  const corners = [
+    { x: x0, y: y0 }, { x: x1, y: y0 },
+    { x: x1, y: y1 }, { x: x0, y: y1 },
+  ];
+  ctx.fillStyle = blue;
+  for (const c of corners) {
+    ctx.fillRect(c.x - hs, c.y - hs, hs * 2, hs * 2);
+  }
+
+  // 辺中央: 細い青塗り長方形
+  const thin = 2 / scale;   // 短辺
+  const long = 8 / scale;   // 長辺
+  ctx.fillStyle = blue;
+  // n, s（横長）
+  ctx.fillRect(midX - long, y0 - thin, long * 2, thin * 2);
+  ctx.fillRect(midX - long, y1 - thin, long * 2, thin * 2);
+  // w, e（縦長）
+  ctx.fillRect(x0 - thin, midY - long, thin * 2, long * 2);
+  ctx.fillRect(x1 - thin, midY - long, thin * 2, long * 2);
 }
 
 function drawBackground(

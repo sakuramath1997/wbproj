@@ -19,6 +19,7 @@ import type {
   OverlayStyleEvent,
   OverlayState,
   Operation,
+  LassoMoveOperation,
 } from '../types';
 import { computeState, getActiveStrokes, getActiveOverlays } from '../utils/statemachine';
 import { generateEraseId, getTimestamp, getOrCreateSessionId, generateSnapshotHash } from '../utils/common';
@@ -32,6 +33,23 @@ const getSignalingServers = (): string[] => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const host = window.location.hostname;
   return [`${protocol}//${host}:4444`];
+};
+
+// ICE サーバー（STUN + 環境変数で TURN を追加可能）
+const getIceServers = (): RTCIceServer[] => {
+  const servers: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ];
+  const turnUrl = import.meta.env.VITE_TURN_URL;
+  if (turnUrl) {
+    servers.push({
+      urls: turnUrl,
+      username: import.meta.env.VITE_TURN_USERNAME || '',
+      credential: import.meta.env.VITE_TURN_CREDENTIAL || '',
+    });
+  }
+  return servers;
 };
 
 // ランダムなユーザー情報
@@ -91,6 +109,9 @@ export interface UseYjsReturn {
   requestAsset: (uuid: string) => void;
   sendAssetResponse: (uuid: string, data: string, mimeType: string) => void;
   clearAssetRequest: (uuid: string) => void;
+  // 投げ縄
+  lassoMoveStrokes: (originalStrokes: DrawEvent[], movedStrokes: DrawEvent[]) => void;
+  lassoDeleteStrokes: (strokes: DrawEvent[]) => void;
 }
 
 export function useYjs({ 
@@ -201,10 +222,7 @@ export function useYjs({
     const provider = new WebrtcProvider(roomId, ydoc, {
       signaling: getSignalingServers(),
       peerOpts: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun.cloudflare.com:3478' },
-        ],
+        iceServers: getIceServers(),
       },
     });
     providerRef.current = provider;
@@ -584,6 +602,57 @@ export function useYjs({
     setRedoStack((_prev: Operation[]) => []);
   }, []);
 
+  // 投げ縄: ストローク移動（元ストロークを E で消去 + 移動後ストロークを D で追加）
+  const lassoMoveStrokes = useCallback((originalStrokes: DrawEvent[], movedStrokes: DrawEvent[]) => {
+    if (!yEventsRef.current || originalStrokes.length === 0) return;
+    const sid = sessionIdRef.current;
+    const ts = getTimestamp();
+
+    // 元ストロークを消去
+    const eraseId = generateEraseId();
+    yEventsRef.current.push([{
+      type: 'E',
+      timestamp: ts,
+      sessionId: sid,
+      id: eraseId,
+      targetIds: originalStrokes.map(s => s.id),
+    }]);
+
+    // 移動後ストロークを追加
+    for (const stroke of movedStrokes) {
+      yEventsRef.current.push([{ ...stroke, timestamp: ts, sessionId: sid }]);
+    }
+
+    setUndoStack((prev: Operation[]) => [...prev, {
+      type: 'lassoMove',
+      eraseId,
+      originalStrokes,
+      newStrokes: movedStrokes,
+    } as LassoMoveOperation]);
+    setRedoStack((_prev: Operation[]) => []);
+  }, []);
+
+  // 投げ縄: ストローク削除
+  const lassoDeleteStrokes = useCallback((strokes: DrawEvent[]) => {
+    if (!yEventsRef.current || strokes.length === 0) return;
+    const sid = sessionIdRef.current;
+    const eraseId = generateEraseId();
+    yEventsRef.current.push([{
+      type: 'E',
+      timestamp: getTimestamp(),
+      sessionId: sid,
+      id: eraseId,
+      targetIds: strokes.map(s => s.id),
+    }]);
+    setUndoStack((prev: Operation[]) => [...prev, {
+      type: 'erase',
+      eraseId,
+      targetIds: strokes.map(s => s.id),
+      targetStrokes: strokes,
+    }]);
+    setRedoStack((_prev: Operation[]) => []);
+  }, []);
+
   // Undo/Redo
   const performUndo = useCallback(() => {
     if (undoStack.length === 0 || !yEventsRef.current) return;
@@ -640,6 +709,18 @@ export function useYjs({
         sessionId: sessionIdRef.current,
         targets: op.changes.map((c: { overlayId: string; before: Partial<{ zIndex: number; opacity: number }> }) => ({ overlayId: c.overlayId, ...c.before })),
       }]);
+    } else if (op.type === 'lassoMove') {
+      // 移動後ストロークを消去 → 元ストロークを復元
+      yEventsRef.current.push([{
+        type: 'E',
+        timestamp: getTimestamp(),
+        sessionId: sessionIdRef.current,
+        id: generateEraseId(),
+        targetIds: op.newStrokes.map((s: DrawEvent) => s.id),
+      }]);
+      for (const stroke of op.originalStrokes) {
+        yEventsRef.current.push([{ ...stroke, timestamp: getTimestamp(), sessionId: sessionIdRef.current }]);
+      }
     }
 
     setUndoStack((prev: Operation[]) => prev.slice(0, -1));
@@ -693,6 +774,18 @@ export function useYjs({
         sessionId: sessionIdRef.current,
         targets: op.changes.map((c: { overlayId: string; after: Partial<{ zIndex: number; opacity: number }> }) => ({ overlayId: c.overlayId, ...c.after })),
       }]);
+    } else if (op.type === 'lassoMove') {
+      // 元ストロークを消去 → 移動後ストロークを復元
+      yEventsRef.current.push([{
+        type: 'E',
+        timestamp: getTimestamp(),
+        sessionId: sessionIdRef.current,
+        id: generateEraseId(),
+        targetIds: op.originalStrokes.map((s: DrawEvent) => s.id),
+      }]);
+      for (const stroke of op.newStrokes) {
+        yEventsRef.current.push([{ ...stroke, timestamp: getTimestamp(), sessionId: sessionIdRef.current }]);
+      }
     }
 
     setRedoStack((prev: Operation[]) => prev.slice(0, -1));
@@ -792,5 +885,8 @@ export function useYjs({
     requestAsset,
     sendAssetResponse,
     clearAssetRequest,
+    // 投げ縄
+    lassoMoveStrokes,
+    lassoDeleteStrokes,
   };
 }

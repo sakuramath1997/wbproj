@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { BoardInfo, WbelxEvent, SnapshotMarkerEvent, WbAsset, AssetType } from '../types';
+import type { BoardInfo, WbelxEvent, SnapshotMarkerEvent, WbAsset, AssetType, DrawEvent, OverlayState, BackgroundConfig } from '../types';
 import { removeFromAssetIndex, addToAssetIndex, onOverlayAdded, onOverlayRemoved, createBoardInfo } from '../types';
 import type { Project } from '../utils';
 import { 
@@ -75,13 +75,14 @@ interface ProjectState {
   addBoard: (name: string) => Promise<string | null>;
   renameBoard: (boardId: string, name: string) => Promise<void>;
   setBoardCanvasSize: (boardId: string, width: number | undefined, height: number | undefined) => Promise<void>;
+  updateBackground: (bg: Partial<BackgroundConfig>) => Promise<void>;
   deleteBoard: (boardId: string) => Promise<void>;
   duplicateBoard: (boardId: string) => Promise<string | null>;
   updateBoardEvents: (boardId: string, events: WbelxEvent[]) => Promise<void>;
   getBoardEvents: (boardId: string) => WbelxEvent[];
   loadBoardEventsAsync: (boardId: string) => Promise<WbelxEvent[]>;
   reorderBoards: (orderedIds: string[]) => Promise<void>;
-  regenerateThumbnail: (boardId: string) => Promise<void>;
+  regenerateThumbnail: (boardId: string, currentStrokes?: DrawEvent[], currentOverlays?: OverlayState[]) => Promise<void>;
   
   // スナップショット操作
   saveBoardWithSnapshot: (boardId: string, events: WbelxEvent[], sessionId: string) => Promise<void>;
@@ -468,6 +469,22 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     await saveProjectConfig(newProject.config);
   },
 
+  updateBackground: async (bg: Partial<BackgroundConfig>) => {
+    const { project } = get();
+    if (!project) return;
+
+    const newProject = {
+      ...project,
+      config: {
+        ...project.config,
+        background: { ...project.config.background, ...bg },
+      },
+    };
+
+    set({ project: newProject });
+    await saveProjectConfig(newProject.config);
+  },
+
   deleteBoard: async (boardId: string) => {
     const { project, boardUuids } = get();
     if (!project) return;
@@ -617,16 +634,25 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
   },
 
   // サムネイルを再生成
-  regenerateThumbnail: async (boardId: string) => {
+  regenerateThumbnail: async (boardId: string, currentStrokes?: DrawEvent[], currentOverlays?: OverlayState[]) => {
     const { project, boardThumbnailUrls } = get();
     if (!project) return;
 
-    const events = project.boards.get(boardId);
-    if (!events) return;
+    let strokes: DrawEvent[];
+    let overlays: OverlayState[];
 
-    const state = computeState(events);
-    const strokes = getActiveStrokes(state);
-    const overlays = getActiveOverlays(state);
+    if (currentStrokes && currentOverlays) {
+      // 呼び出し元から最新状態が渡された場合はそのまま使用
+      strokes = currentStrokes;
+      overlays = currentOverlays;
+    } else {
+      // store の boards から計算（初期化・ファイル読み込み時用）
+      const events = project.boards.get(boardId);
+      if (!events) return;
+      const state = computeState(events);
+      strokes = getActiveStrokes(state);
+      overlays = getActiveOverlays(state);
+    }
     const blob = generateThumbnail(strokes, overlays, project.config.background);
     if (!blob) return;
 

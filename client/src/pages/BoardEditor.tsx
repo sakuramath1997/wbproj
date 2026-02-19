@@ -32,6 +32,7 @@ import {
 } from '../utils/storage';
 import { loadPdfDocument, renderPdfPage, getPdfPageCount } from '../utils/pdf';
 import { computeState, getActiveStrokes, getActiveOverlays } from '../utils/statemachine';
+import { exportAsPng, exportAsSvg, downloadBlob, downloadString } from '../utils/export';
 
 // 通知の型
 interface Notification {
@@ -211,6 +212,9 @@ export function BoardEditor() {
     requestAsset,
     sendAssetResponse,
     clearAssetRequest,
+    // 投げ縄
+    lassoMoveStrokes,
+    lassoDeleteStrokes,
   } = useYjs({
     roomId,
     enabled: !!roomId && !isLoading,
@@ -1273,8 +1277,8 @@ export function BoardEditor() {
       ];
       await saveBoardSnapshot(boardId, snapshotEvents);
       
-      // サムネイル再生成（非同期、エラーは無視）
-      try { await regenerateThumbnail(boardId); } catch { /* ignore */ }
+      // サムネイル再生成（最新のストローク・オーバーレイを直接渡す）
+      try { await regenerateThumbnail(boardId, activeStrokes, activeOverlays); } catch { /* ignore */ }
     }
     
     navigate(isJoiningViaShareLink ? '/' : '/project');
@@ -1319,6 +1323,23 @@ export function BoardEditor() {
     URL.revokeObjectURL(url);
   }, [exportSnapshotWbelx, boardInfo]);
 
+  const handleExportPng = useCallback(() => {
+    const blob = exportAsPng(activeStrokes, activeOverlays, overlayImages, {
+      dpr: 2,
+      background: project?.config.background,
+      canvasSize: canvasSize || undefined,
+    });
+    if (blob) downloadBlob(blob, `${boardInfo?.name || 'board'}.png`);
+  }, [activeStrokes, activeOverlays, overlayImages, project?.config.background, canvasSize, boardInfo]);
+
+  const handleExportSvg = useCallback(() => {
+    const svg = exportAsSvg(activeStrokes, activeOverlays, overlayImages, {
+      background: project?.config.background,
+      canvasSize: canvasSize || undefined,
+    });
+    downloadString(svg, `${boardInfo?.name || 'board'}.svg`, 'image/svg+xml');
+  }, [activeStrokes, activeOverlays, overlayImages, project?.config.background, canvasSize, boardInfo]);
+
   // キーボードショートカット
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1339,6 +1360,7 @@ export function BoardEditor() {
         case 'v': setTool('select'); break;
         case 'p': setTool('pen'); break;
         case 'e': setTool('eraser'); break;
+        case 'l': setTool('lasso'); break;
         case ' ': e.preventDefault(); setTool('pan'); break;
         case '1': setStrokeWidthKey('thin'); break;
         case '2': setStrokeWidthKey('medium'); break;
@@ -1483,6 +1505,8 @@ export function BoardEditor() {
         onCopyShareLink={handleCopyShareLink}
         onExportWbelx={handleExportWbelx}
         onExportSnapshot={handleExportSnapshot}
+        onExportPng={handleExportPng}
+        onExportSvg={handleExportSvg}
         onAddAsset={handleAddAsset}
         onImportFile={importAsset}
         availableAssets={availableAssets}
@@ -1516,6 +1540,8 @@ export function BoardEditor() {
           onUpdateCursor={updateCursor}
           onHideCursor={hideCursor}
           onTransformChange={handleTransformChange}
+          onLassoMove={lassoMoveStrokes}
+          onLassoDelete={lassoDeleteStrokes}
         />
 
         {/* オーバーレイ選択中: インラインコントロール */}

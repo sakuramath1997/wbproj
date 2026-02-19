@@ -111,7 +111,7 @@ export interface ActiveStroke {
 // ツール関連
 // ========================================
 
-export type ToolType = 'pen' | 'eraser' | 'pan' | 'select';
+export type ToolType = 'pen' | 'eraser' | 'pan' | 'select' | 'lasso';
 export type StrokeWidthKey = 'thin' | 'medium' | 'thick';
 
 export const COLOR_PALETTE = [

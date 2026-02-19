@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useProjectStore, type ImportedAsset } from '../hooks/useProjectStore';
-import type { BoardInfo, BoardSortKey } from '../types';
+import type { BoardInfo, BoardSortKey, BackgroundPattern } from '../types';
 import { sortBoards } from '../types';
 
 type TabType = 'boards' | 'assets' | 'settings' | 'export';
@@ -539,45 +539,88 @@ function AssetsTab() {
 }
 
 // ========================================
-// Settings Tab (Placeholder)
+// Settings Tab
 // ========================================
 
 function SettingsTab() {
-  const { project } = useProjectStore();
+  const { project, updateBackground } = useProjectStore();
+  const previewRef = useRef<HTMLCanvasElement>(null);
   
   if (!project) return null;
   
   const { background } = project.config;
 
+  // プレビュー描画
+  useEffect(() => {
+    const canvas = previewRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const w = canvas.width, h = canvas.height;
+    ctx.fillStyle = background.color;
+    ctx.fillRect(0, 0, w, h);
+
+    if (background.pattern === 'none') return;
+    const size = background.patternSize;
+    ctx.strokeStyle = background.patternColor;
+    ctx.fillStyle = background.patternColor;
+
+    if (background.pattern === 'grid') {
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      for (let x = size; x < w; x += size) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
+      for (let y = size; y < h; y += size) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+      ctx.stroke();
+    } else if (background.pattern === 'dots') {
+      for (let x = size; x < w; x += size)
+        for (let y = size; y < h; y += size) {
+          ctx.beginPath(); ctx.arc(x, y, 1, 0, Math.PI * 2); ctx.fill();
+        }
+    } else if (background.pattern === 'lines') {
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      for (let y = size; y < h; y += size) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+      ctx.stroke();
+    }
+  }, [background]);
+
+  const labelStyle: React.CSSProperties = { display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' };
+  const rowStyle: React.CSSProperties = { marginBottom: 16 };
+
   return (
-    <div style={{ maxWidth: 400 }}>
-      <h3 style={{ marginBottom: 16 }}>Background Settings</h3>
-      
-      <div style={{ marginBottom: 16 }}>
-        <label style={{ display: 'block', marginBottom: 4, fontSize: 14 }}>
-          Color
-        </label>
-        <input 
-          type="color" 
-          value={background.color}
-          disabled
-          style={{ width: 60, height: 32 }}
-        />
+    <div style={{ maxWidth: 420 }}>
+      <h3 style={{ marginBottom: 16 }}>Background</h3>
+
+      {/* プレビュー */}
+      <div style={{ ...rowStyle, border: '1px solid var(--border-light)', borderRadius: 8, overflow: 'hidden' }}>
+        <canvas ref={previewRef} width={400} height={120} style={{ display: 'block', width: '100%', height: 120 }} />
       </div>
 
-      <div style={{ marginBottom: 16 }}>
-        <label style={{ display: 'block', marginBottom: 4, fontSize: 14 }}>
-          Pattern
-        </label>
-        <select 
+      {/* 背景色 */}
+      <div style={rowStyle}>
+        <label style={labelStyle}>Background Color</label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="color"
+            value={background.color}
+            onChange={e => updateBackground({ color: e.target.value })}
+            style={{ width: 40, height: 32, border: 'none', padding: 0, cursor: 'pointer' }}
+          />
+          <span style={{ fontSize: 13, fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
+            {background.color}
+          </span>
+        </div>
+      </div>
+
+      {/* パターン */}
+      <div style={rowStyle}>
+        <label style={labelStyle}>Pattern</label>
+        <select
           value={background.pattern}
-          disabled
+          onChange={e => updateBackground({ pattern: e.target.value as BackgroundPattern })}
           style={{
-            padding: '8px 12px',
-            borderRadius: 6,
-            border: '1px solid var(--border-light)',
-            fontSize: 14,
-            width: '100%',
+            padding: '6px 10px', borderRadius: 6,
+            border: '1px solid var(--border-light)', fontSize: 14, width: '100%',
           }}
         >
           <option value="none">None</option>
@@ -587,9 +630,40 @@ function SettingsTab() {
         </select>
       </div>
 
-      <p style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-        Settings editing coming soon...
-      </p>
+      {/* パターン詳細（pattern !== 'none' の場合のみ） */}
+      {background.pattern !== 'none' && (
+        <>
+          <div style={rowStyle}>
+            <label style={labelStyle}>
+              Pattern Size — {background.patternSize}px
+            </label>
+            <input
+              type="range"
+              min={8}
+              max={80}
+              step={1}
+              value={background.patternSize}
+              onChange={e => updateBackground({ patternSize: Number(e.target.value) })}
+              style={{ width: '100%' }}
+            />
+          </div>
+
+          <div style={rowStyle}>
+            <label style={labelStyle}>Pattern Color</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="color"
+                value={background.patternColor}
+                onChange={e => updateBackground({ patternColor: e.target.value })}
+                style={{ width: 40, height: 32, border: 'none', padding: 0, cursor: 'pointer' }}
+              />
+              <span style={{ fontSize: 13, fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
+                {background.patternColor}
+              </span>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

@@ -21,6 +21,8 @@ interface ToolbarProps {
   onCopyShareLink?: () => void;
   onExportWbelx?: () => void;
   onExportSnapshot?: () => void;
+  onExportPng?: () => void;
+  onExportSvg?: () => void;
   onAddAsset?: (uuid: string) => void;
   onImportFile?: (file: File) => Promise<string | null>;
   availableAssets?: Array<{ uuid: string; fileName: string; type: 'image' | 'document' | 'board' }>;
@@ -47,6 +49,8 @@ export function Toolbar({
   onCopyShareLink,
   onExportWbelx,
   onExportSnapshot,
+  onExportPng,
+  onExportSvg,
   onAddAsset,
   onImportFile,
   availableAssets = [],
@@ -136,6 +140,13 @@ export function Toolbar({
           title="Pan (Space)"
         >
           ✋
+        </button>
+        <button
+          className={`toolbar-btn ${tool === 'lasso' ? 'active' : ''}`}
+          onClick={() => onToolChange('lasso')}
+          title="Lasso (L)"
+        >
+          〇
         </button>
       </div>
 
@@ -418,6 +429,25 @@ export function Toolbar({
               onClick={() => setShowExportMenu(false)}
             />
             <div className="dropdown-menu">
+              <button
+                className="dropdown-item"
+                onClick={() => {
+                  onExportPng?.();
+                  setShowExportMenu(false);
+                }}
+              >
+                🖼️ Download as PNG
+              </button>
+              <button
+                className="dropdown-item"
+                onClick={() => {
+                  onExportSvg?.();
+                  setShowExportMenu(false);
+                }}
+              >
+                📐 Download as SVG
+              </button>
+              <hr style={{ margin: '4px 0', border: 'none', borderTop: '1px solid var(--border-light)' }} />
               <button
                 className="dropdown-item"
                 onClick={() => {
