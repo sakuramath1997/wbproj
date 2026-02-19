@@ -333,14 +333,19 @@ function BoardsTab({
             onDragLeave={handleDragLeave}
             onDragOver={handleDragOver}
             onDrop={(e: React.DragEvent<HTMLDivElement>) => handleDrop(e, board.id)}
-            onClick={() => !draggedId && !menuOpenId && onBoardClick(board.id)}
+            onClick={() => {
+              if (menuOpenId) { setMenuOpenId(null); return; }
+              if (!draggedId) onBoardClick(board.id);
+            }}
           >
             {isDraggable && (
               <div className="board-drag-handle">⋮⋮</div>
             )}
             <button 
               className="board-menu-btn"
-              onClick={() => {
+              onClick={(e: React.MouseEvent) => {
+                e.stopPropagation();
+                setMenuOpenId(menuOpenId === board.id ? null : board.id);
               }}
             >
               ⋯
