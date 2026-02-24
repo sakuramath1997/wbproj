@@ -15,6 +15,7 @@ export function ProjectDashboard() {
     renameBoard, 
     deleteBoard, 
     duplicateBoard,
+    minimizeBoard,
     renameProject, 
     save, 
     reorderBoards,
@@ -81,6 +82,25 @@ export function ProjectDashboard() {
       await deleteBoard(boardId);
     }
   }, [deleteBoard, boards.length]);
+
+  const handleMinimizeBoard = useCallback(async (boardId: string, boardName: string) => {
+    if (!confirm(
+      `Minimize "${boardName}"?\n\n` +
+      `This will remove all event history (Undo/Redo) and keep only the current drawing state.\n\n` +
+      `⚠️ This operation cannot be undone.`
+    )) {
+      return;
+    }
+    const result = await minimizeBoard(boardId);
+    if (result) {
+      const parts = [
+        `Events: ${result.beforeEventCount} → ${result.afterEventCount}`,
+        `Strokes: ${result.activeStrokeCount}`,
+        `Overlays: ${result.activeOverlayCount}`,
+      ];
+      alert(`✅ Minimized "${boardName}"\n\n${parts.join('\n')}`);
+    }
+  }, [minimizeBoard]);
 
   const handleTitleClick = useCallback(() => {
     if (project) {
@@ -181,6 +201,7 @@ export function ProjectDashboard() {
             onRenameBoard={handleRenameBoard}
             onDeleteBoard={handleDeleteBoard}
             onDuplicateBoard={async (boardId: string) => { await duplicateBoard(boardId); }}
+            onMinimizeBoard={handleMinimizeBoard}
           />
         )}
         {activeTab === 'assets' && <AssetsTab />}
@@ -204,6 +225,7 @@ interface BoardsTabProps {
   onRenameBoard: (boardId: string, currentName: string) => void;
   onDeleteBoard: (boardId: string, boardName: string) => void;
   onDuplicateBoard: (boardId: string) => void;
+  onMinimizeBoard: (boardId: string, boardName: string) => void;
 }
 
 function BoardsTab({ 
@@ -216,6 +238,7 @@ function BoardsTab({
   onRenameBoard,
   onDeleteBoard,
   onDuplicateBoard,
+  onMinimizeBoard,
 }: BoardsTabProps) {
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
@@ -369,6 +392,16 @@ function BoardsTab({
                   }}
                 >
                   📄 Duplicate
+                </button>
+                <div className="board-menu-separator" />
+                <button 
+                  className="board-menu-item warning"
+                  onClick={() => {
+                    setMenuOpenId(null);
+                    onMinimizeBoard(board.id, board.name);
+                  }}
+                >
+                  🗜️ Minimize
                 </button>
                 <button 
                   className="board-menu-item danger"

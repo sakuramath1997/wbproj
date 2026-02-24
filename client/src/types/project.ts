@@ -1,8 +1,17 @@
 /**
- * Whiteboard Project (.wbproj) 型定義
+ * Whiteboard Project (.wbproj) v4 型定義
  * 
  * project.toml の構造を定義
  */
+
+// UUID v4 生成（循環依存を避けるためインライン）
+function genUuid(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
 
 // ========================================
 // 背景パターン
@@ -16,10 +25,17 @@ export type BackgroundPattern = 'none' | 'dots' | 'grid' | 'lines';
 
 /** [project] セクション */
 export interface ProjectInfo {
-  version: string;
+  version: string;          // "4.0"
+  uuid: string;             // UUID v4
   name: string;
-  createdAt: string;    // ISO 8601
-  updatedAt: string;    // ISO 8601
+  createdAt: string;        // ISO 8601
+  updatedAt: string;        // ISO 8601
+}
+
+/** [defaults] セクション */
+export interface DefaultsConfig {
+  canvasWidth: number;      // 0 = 無制限
+  canvasHeight: number;     // 0 = 無制限
 }
 
 /** [background] セクション */
@@ -50,23 +66,25 @@ export interface BoardInfo {
   updatedAt: string;          // ISO 8601
   hostedBy: string;           // session_id（空文字 = 未ホスト）
   hostedSince: string;        // ISO 8601（空文字 = 未ホスト）
-  canvasWidth?: number;       // px（省略 = 無限キャンバス）
-  canvasHeight?: number;      // px（省略 = 無限キャンバス）
+  canvasWidth?: number;       // px（省略 = defaults を使用）
+  canvasHeight?: number;      // px（省略 = defaults を使用）
 }
 
-/** [assets.{uuid}] セクション（外部アセットのみ） */
+/**
+ * [assets.{uuid}] セクション
+ * v4: mimeType/fileSize は wbasset v2 に移動済み
+ */
 export interface ImportedAssetInfo {
   uuid: string;
   originalPath: string;
   importedBy: string;         // session_id
   importedAt: string;         // ISO 8601
-  mimeType: string;
-  fileSize: number;           // bytes
 }
 
 /** project.toml 全体 */
 export interface ProjectConfig {
   project: ProjectInfo;
+  defaults: DefaultsConfig;
   background: BackgroundConfig;
   rendering: RenderingConfig;
   collaboration: CollaborationConfig;
@@ -77,6 +95,11 @@ export interface ProjectConfig {
 // ========================================
 // デフォルト値
 // ========================================
+
+export const DEFAULT_DEFAULTS: DefaultsConfig = {
+  canvasWidth: 0,
+  canvasHeight: 0,
+};
 
 export const DEFAULT_BACKGROUND: BackgroundConfig = {
   color: '#ffffff',
@@ -103,11 +126,13 @@ export function createProjectConfig(name: string): ProjectConfig {
   const now = new Date().toISOString();
   return {
     project: {
-      version: '2.0',
+      version: '4.0',
+      uuid: genUuid(),
       name,
       createdAt: now,
       updatedAt: now,
     },
+    defaults: { ...DEFAULT_DEFAULTS },
     background: { ...DEFAULT_BACKGROUND },
     rendering: { ...DEFAULT_RENDERING, boardOverlayFallbackViewport: { ...DEFAULT_RENDERING.boardOverlayFallbackViewport } },
     collaboration: { ...DEFAULT_COLLABORATION },
@@ -141,9 +166,16 @@ export function projectConfigToToml(config: ProjectConfig): string {
   // [project]
   lines.push('[project]');
   lines.push(`version = "${config.project.version}"`);
+  lines.push(`uuid = "${config.project.uuid}"`);
   lines.push(`name = "${config.project.name}"`);
   lines.push(`created_at = "${config.project.createdAt}"`);
   lines.push(`updated_at = "${config.project.updatedAt}"`);
+  lines.push('');
+
+  // [defaults]
+  lines.push('[defaults]');
+  lines.push(`canvas_width = ${config.defaults.canvasWidth}`);
+  lines.push(`canvas_height = ${config.defaults.canvasHeight}`);
   lines.push('');
 
   // [background]
@@ -192,8 +224,6 @@ export function projectConfigToToml(config: ProjectConfig): string {
     lines.push(`original_path = "${asset.originalPath}"`);
     lines.push(`imported_by = "${asset.importedBy}"`);
     lines.push(`imported_at = "${asset.importedAt}"`);
-    lines.push(`mime_type = "${asset.mimeType}"`);
-    lines.push(`file_size = ${asset.fileSize}`);
     lines.push('');
   }
 

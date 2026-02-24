@@ -41,6 +41,36 @@ export function generateViewportId(): string {
   return `v:${randomString(12)}`;
 }
 
+/** OT 操作 ID を生成 (ot:xxx) */
+export function generateTransformOpId(): string {
+  return `ot:${randomString(12)}`;
+}
+
+/** OV 操作 ID を生成 (ov:xxx) */
+export function generateViewportOpId(): string {
+  return `ov:${randomString(12)}`;
+}
+
+/** OS 操作 ID を生成 (os:xxx) */
+export function generateStyleOpId(): string {
+  return `os:${randomString(12)}`;
+}
+
+/** BG 操作 ID を生成 (bg:xxx) */
+export function generateBgOpId(): string {
+  return `bg:${randomString(12)}`;
+}
+
+/** CS 操作 ID を生成 (cs:xxx) */
+export function generateCsOpId(): string {
+  return `cs:${randomString(12)}`;
+}
+
+/** BATCH 操作 ID を生成 (b:xxx) */
+export function generateBatchId(): string {
+  return `b:${randomString(12)}`;
+}
+
 /** UUID v4 を生成 */
 export function generateUuid(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -79,10 +109,14 @@ export function isValidSessionId(id: string): boolean {
   return /^[a-zA-Z0-9_-]*$/.test(id);
 }
 
-/** セッション ID を取得または生成 */
-export function getOrCreateSessionId(): string {
+/**
+ * セッション ID を取得または生成。
+ * projectUuid を渡すとプロジェクト単位で永続化する（impl-guide §Session ID 推奨）。
+ */
+export function getOrCreateSessionId(projectUuid?: string): string {
+  const key = projectUuid ? `session:${projectUuid}` : SESSION_ID_KEY;
   try {
-    const stored = localStorage.getItem(SESSION_ID_KEY);
+    const stored = localStorage.getItem(key);
     if (stored && isValidSessionId(stored)) {
       return stored;
     }
@@ -93,7 +127,7 @@ export function getOrCreateSessionId(): string {
   const newId = randomString(16);
 
   try {
-    localStorage.setItem(SESSION_ID_KEY, newId);
+    localStorage.setItem(key, newId);
   } catch {
     // 保存失敗は無視
   }

@@ -1,31 +1,45 @@
 /**
- * Whiteboard Extended Event Log (.wbelx) v2 型定義
+ * Whiteboard Extended Event Log (.wbelx) v4 型定義
  *
- * .wbel v6 のスーパーセット。オーバーレイ操作を追加。
+ * v3.1 → v4 変更点:
+ * - OR.targetOverlayIds: string[] → OR.targetOverlayId: string（単一対象化）
+ * - OS.targets: OverlayStyleTarget[] → OS 自体が単一ターゲット（overlayId, dzIndex?, dOpacity?）
+ * - BATCH イベント型の導入（アトミックグループ）
+ * - LassoMoveOperation の廃止（BATCH に統合）
+ * - E.targetIds → E.targetId（wbel v8 に追従）
  */
 
 import type { DrawEvent, EraseEvent, SnapshotMarkerEvent, StrokeOperation } from './wbel';
 
-// Re-export wbel types
 export * from './wbel';
+
+// ========================================
+// wbelx ヘッダー
+// ========================================
+
+export interface WbelxHeaderEvent {
+  type: 'H';
+  version: 4;
+  createdAt: string;
+  canvasWidth: number;
+  canvasHeight: number;
+}
 
 // ========================================
 // スナップショットヘッダー
 // ========================================
 
-/** スナップショットヘッダーイベント */
 export interface SnapshotHeaderEvent {
   type: 'SS';
   version: number;
   hash: string;
-  createdAt: string;      // ISO 8601
+  createdAt: string;
 }
 
 // ========================================
 // Viewport 型
 // ========================================
 
-/** 表示領域 */
 export interface Viewport {
   x: number;
   y: number;
@@ -34,10 +48,25 @@ export interface Viewport {
 }
 
 // ========================================
+// デルタ記録方式（§2-2）
+// ========================================
+
+export interface ColorDelta {
+  space: 'srgb';
+  dr: number;
+  dg: number;
+  db: number;
+}
+
+export interface EnumDelta<T extends string = string> {
+  prev: T;
+  next: T;
+}
+
+// ========================================
 // オーバーレイイベント型
 // ========================================
 
-/** Overlay Add イベント */
 export interface OverlayAddEvent {
   type: 'OA';
   timestamp: string;
@@ -55,66 +84,129 @@ export interface OverlayAddEvent {
   opacity: number;
 }
 
-/** Overlay Remove イベント */
+/** Overlay Remove — 単一対象（v4） */
 export interface OverlayRemoveEvent {
   type: 'OR';
   timestamp: string;
   sessionId: string;
   removeId: string;
-  targetOverlayIds: string[];
+  targetOverlayId: string;
 }
 
-/**
- * Overlay Transform イベント（移動・リサイズ・回転）
- * 差分記録方式: 変更されたフィールドのみを含める。
- * x, y, width, height, rotation のうち少なくとも1つは必須。
- */
 export interface OverlayTransformEvent {
   type: 'OT';
   timestamp: string;
   sessionId: string;
+  id: string;
   overlayId: string;
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  rotation?: number;
+  dx?: number;
+  dy?: number;
+  dWidth?: number;
+  dHeight?: number;
+  dRotation?: number;
 }
 
-/**
- * Overlay Viewport イベント（表示領域・ページ変更）
- * 差分記録方式: 変更されたフィールドのみを含める。
- * viewport, page のうち少なくとも1つは必須。
- */
+export interface ViewportDelta {
+  dx?: number;
+  dy?: number;
+  dWidth?: number;
+  dHeight?: number;
+}
+
 export interface OverlayViewportEvent {
   type: 'OV';
   timestamp: string;
   sessionId: string;
+  id: string;
   overlayId: string;
-  viewport?: Viewport;
-  page?: number;
+  dViewport?: ViewportDelta;
+  dPage?: number;
 }
 
-/** OS イベントの個別ターゲット */
-export interface OverlayStyleTarget {
-  overlayId: string;
-  zIndex?: number;
-  opacity?: number;
-}
-
-/**
- * Overlay Style イベント（zIndex・opacity 変更）
- * 複数オーバーレイを1イベントで変更できる。
- * 差分記録方式: 各ターゲットで変更されたフィールドのみを含める。
- */
+/** Overlay Style — 単一ターゲット（v4） */
 export interface OverlayStyleEvent {
   type: 'OS';
   timestamp: string;
   sessionId: string;
-  targets: OverlayStyleTarget[];
+  id: string;
+  overlayId: string;
+  dzIndex?: number;
+  dOpacity?: number;
 }
 
-/** オーバーレイイベント（統合型） */
+// ========================================
+// 背景設定イベント（§3-6）
+// ========================================
+
+export type BgPattern = 'none' | 'dots' | 'grid' | 'lines';
+
+export interface BackgroundEvent {
+  type: 'BG';
+  timestamp: string;
+  sessionId: string;
+  id: string;
+  dColor?: ColorDelta;
+  pattern?: EnumDelta<BgPattern>;
+  dPatternSize?: number;
+  dPatternColor?: ColorDelta;
+}
+
+// ========================================
+// Canvas Size イベント（§3-7）
+// ========================================
+
+export interface CanvasSizeEvent {
+  type: 'CS';
+  timestamp: string;
+  sessionId: string;
+  id: string;
+  dCanvasWidth?: number;
+  dCanvasHeight?: number;
+}
+
+// ========================================
+// BATCH イベント（§2-4 アトミックグループ）
+// ========================================
+
+/**
+ * BATCH 内に格納できるサブイベント型。
+ * SnapshotMarkerEvent と BatchEvent 自身は含まない。
+ */
+export type SubEvent =
+  | DrawEvent
+  | EraseEvent
+  | OverlayAddEvent
+  | OverlayRemoveEvent
+  | OverlayTransformEvent
+  | OverlayViewportEvent
+  | OverlayStyleEvent
+  | BackgroundEvent
+  | CanvasSizeEvent;
+
+/**
+ * BATCH イベント — 複数のサブイベントをアトミックな1操作として記録する。
+ *
+ * 正規形ルール:
+ * - サブイベントは2つ以上（MUST）
+ * - 単一操作は BATCH で包まない（MUST）
+ * - ネスト禁止（MUST）
+ *
+ * サブイベントの timestamp / sessionId は BATCH のものを継承する。
+ * ファイルフォーマット上、サブイベントからは省略される。
+ * メモリ上では BATCH の値で hydrate された状態で保持する。
+ */
+export interface BatchEvent {
+  type: 'BATCH';
+  id: string;
+  timestamp: string;
+  sessionId: string;
+  events: SubEvent[];
+}
+
+// ========================================
+// イベント統合型
+// ========================================
+
 export type OverlayEvent =
   | OverlayAddEvent
   | OverlayRemoveEvent
@@ -122,18 +214,16 @@ export type OverlayEvent =
   | OverlayViewportEvent
   | OverlayStyleEvent;
 
-/** wbelx イベント（統合型） */
+/** wbelx のトップレベルイベント */
 export type WbelxEvent =
-  | DrawEvent
-  | EraseEvent
+  | SubEvent
   | SnapshotMarkerEvent
-  | OverlayEvent;
+  | BatchEvent;
 
 // ========================================
 // オーバーレイ状態
 // ========================================
 
-/** オーバーレイの現在の状態 */
 export interface OverlayState {
   overlayId: string;
   assetUuid: string;
@@ -149,95 +239,117 @@ export interface OverlayState {
 }
 
 // ========================================
-// オーバーレイ Undo/Redo 操作記録
+// 背景状態（§4-2）
 // ========================================
 
-/** Overlay Add 操作記録 */
+export interface BackgroundState {
+  color: { r: number; g: number; b: number } | null;
+  pattern: BgPattern | null;
+  patternSize: number | null;
+  patternColor: { r: number; g: number; b: number } | null;
+}
+
+export const BG_SPEC_DEFAULTS = {
+  color: { r: 255, g: 255, b: 255 },
+  pattern: 'none' as BgPattern,
+  patternSize: 20,
+  patternColor: { r: 224, g: 224, b: 224 },
+} as const;
+
+// ========================================
+// Undo/Redo 操作記録
+// ========================================
+
 export interface OverlayAddOperation {
   type: 'overlayAdd';
   overlayId: string;
   overlayData: OverlayAddEvent;
 }
 
-/** Overlay Remove 操作記録 */
 export interface OverlayRemoveOperation {
   type: 'overlayRemove';
   removeId: string;
-  targetOverlayIds: string[];
-  targetOverlays: OverlayAddEvent[];
+  targetOverlayId: string;
+  targetOverlay: OverlayAddEvent;
 }
 
-/**
- * Overlay Transform 操作記録
- * before/after は変更されたフィールドのみを保持する（差分）
- */
 export interface OverlayTransformOperation {
   type: 'overlayTransform';
+  id: string;
   overlayId: string;
-  before: Partial<{ x: number; y: number; width: number; height: number; rotation: number }>;
-  after: Partial<{ x: number; y: number; width: number; height: number; rotation: number }>;
+  dx: number;
+  dy: number;
+  dWidth: number;
+  dHeight: number;
+  dRotation: number;
 }
 
-/**
- * Overlay Viewport 操作記録
- * before/after は変更されたフィールドのみを保持する（差分）
- */
 export interface OverlayViewportOperation {
   type: 'overlayViewport';
+  id: string;
   overlayId: string;
-  before: Partial<{ viewport: Viewport; page: number }>;
-  after: Partial<{ viewport: Viewport; page: number }>;
+  dViewport?: ViewportDelta;
+  dPage?: number;
 }
 
-/**
- * Overlay Style 操作記録
- * OS が複数ターゲット対応になったため、変更リストとして保持する
- */
+/** OS Undo: 単一ターゲット（v4） */
 export interface OverlayStyleOperation {
   type: 'overlayStyle';
-  changes: Array<{
-    overlayId: string;
-    before: Partial<{ zIndex: number; opacity: number }>;
-    after: Partial<{ zIndex: number; opacity: number }>;
-  }>;
+  id: string;
+  overlayId: string;
+  dzIndex?: number;
+  dOpacity?: number;
 }
 
-/** オーバーレイ操作記録（統合型） */
-export type OverlayOperation =
+export interface BackgroundOperation {
+  type: 'background';
+  id: string;
+  dColor?: ColorDelta;
+  pattern?: EnumDelta<BgPattern>;
+  dPatternSize?: number;
+  dPatternColor?: ColorDelta;
+}
+
+export interface CanvasSizeOperation {
+  type: 'canvasSize';
+  id: string;
+  dCanvasWidth?: number;
+  dCanvasHeight?: number;
+}
+
+/** 単一操作（BATCH のサブ操作としても使用） */
+export type SingleOperation =
+  | StrokeOperation
   | OverlayAddOperation
   | OverlayRemoveOperation
   | OverlayTransformOperation
   | OverlayViewportOperation
-  | OverlayStyleOperation;
+  | OverlayStyleOperation
+  | BackgroundOperation
+  | CanvasSizeOperation;
 
-// ========================================
-// 投げ縄 Undo/Redo 操作記録
-// ========================================
-
-/** 投げ縄移動の操作記録 */
-export interface LassoMoveOperation {
-  type: 'lassoMove';
-  eraseId: string;                // 元ストローク消去の E イベント ID
-  originalStrokes: DrawEvent[];   // 移動前ストローク（復元用）
-  newStrokes: DrawEvent[];        // 移動後ストローク（Redo 用）
+/** BATCH 操作記録 — Undo 時は operations を逆順に反転する */
+export interface BatchOperation {
+  type: 'batch';
+  batchId: string;
+  operations: SingleOperation[];
 }
 
-/** 全操作記録（ストローク + オーバーレイ + 投げ縄） */
-export type Operation = StrokeOperation | OverlayOperation | LassoMoveOperation;
+/** 全操作記録 = 1 Undo 単位 */
+export type Operation = SingleOperation | BatchOperation;
 
 // ========================================
 // 拡張ホワイトボード状態
 // ========================================
 
-/** wbelx ホワイトボード状態 */
 export interface WbelxState {
-  // ストローク
   activeStrokeIds: Set<string>;
   strokes: Map<string, DrawEvent>;
-
-  // オーバーレイ
   activeOverlayIds: Set<string>;
   overlays: Map<string, OverlayState>;
+  background: BackgroundState | null;
+  canvasWidth: number;
+  canvasHeight: number;
 }
 
 // ========================================
@@ -245,7 +357,7 @@ export interface WbelxState {
 // ========================================
 
 export function isOverlayEvent(event: WbelxEvent): event is OverlayEvent {
-  return event.type.startsWith('O');
+  return event.type === 'OA' || event.type === 'OR' || event.type === 'OT' || event.type === 'OV' || event.type === 'OS';
 }
 
 export function isStrokeEvent(event: WbelxEvent): event is DrawEvent | EraseEvent {
@@ -254,4 +366,38 @@ export function isStrokeEvent(event: WbelxEvent): event is DrawEvent | EraseEven
 
 export function isSnapshotEvent(event: WbelxEvent): event is SnapshotMarkerEvent {
   return event.type === 'S';
+}
+
+export function isBackgroundEvent(event: WbelxEvent): event is BackgroundEvent {
+  return event.type === 'BG';
+}
+
+export function isCanvasSizeEvent(event: WbelxEvent): event is CanvasSizeEvent {
+  return event.type === 'CS';
+}
+
+export function isBatchEvent(event: WbelxEvent): event is BatchEvent {
+  return event.type === 'BATCH';
+}
+
+export function isSubEvent(event: WbelxEvent): event is SubEvent {
+  return event.type !== 'BATCH' && event.type !== 'S';
+}
+
+// ========================================
+// 投げ縄選択情報
+// ========================================
+
+/** 投げ縄で選択されたストローク ID とオーバーレイ ID */
+export interface LassoSelection {
+  strokeIds: Set<string>;
+  overlayIds: Set<string>;
+}
+
+/** 投げ縄クリップボード（コピー / 貼り付け用） */
+export interface LassoClipboard {
+  strokes: DrawEvent[];
+  overlays: OverlayState[];
+  /** 元の BBox (canvas 座標) [minX, minY, maxX, maxY] */
+  canvasBBox: [number, number, number, number];
 }

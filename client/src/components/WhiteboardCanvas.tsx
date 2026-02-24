@@ -1,22 +1,20 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
+import type { OverlayDisplayState } from '../types/overlay-display';
 import type { 
   ToolType, 
   Point, 
   ActiveStroke, 
   CanvasTransform, 
   DrawEvent,
-  EraseEvent,
   CursorInfo,
   OverlayState,
-  OverlayRemoveEvent,
-  OverlayTransformEvent,
   AssetType,
   BackgroundConfig,
+  LassoSelection,
 } from '../types';
 import { 
   calculateBBox, 
   generateStrokeId,
-  generateEraseId,
   getTimestamp,
   isPointInBBox,
   fitCurveToSvgPath,
@@ -42,33 +40,40 @@ interface WhiteboardCanvasProps {
   strokeWidth: number;
   sessionId: string;
   selectedOverlayId: string | null;
-  overlayImages: Map<string, HTMLImageElement>;
+  overlayDisplayStates: Map<string, OverlayDisplayState>;
   overlayAssetTypes: Map<string, AssetType>;
   /** ドラッグ中のリアルタイム透明度プレビュー用（overlayId → opacity） */
   overlayOpacityOverrides?: Map<string, number>;
   /** AR ロック設定（overlayId → locked, デフォルト true） */
   overlayLockAspectRatios?: Map<string, boolean>;
-  /** 再生成中の overlayId セット（スピナー表示用） */
-  loadingOverlayIds?: Set<string>;
-  /** アセットが見つからない overlayId セット（プレースホルダー表示用） */
-  missingOverlayIds?: Set<string>;
   /** 背景設定（project.toml の [background]） */
   backgroundConfig?: BackgroundConfig;
   /** 固定キャンバスサイズ（省略 = 無限キャンバス） */
   canvasSize?: { width: number; height: number };
   onAddDrawEvent: (event: DrawEvent) => void;
-  onAddEraseEvent: (event: EraseEvent, targetStrokes: DrawEvent[]) => void;
-  onRemoveOverlayEvent: (event: OverlayRemoveEvent) => void;
-  onTransformOverlay: (event: OverlayTransformEvent, before: Partial<{ x: number; y: number; width: number; height: number; rotation: number }>) => void;
+  onEraseStrokes: (targetStrokes: DrawEvent[]) => void;
+  onRemoveOverlay: (overlayId: string) => void;
+  onTransformOverlay: (
+    overlayId: string,
+    before: { x: number; y: number; width: number; height: number; rotation: number },
+    after: { x: number; y: number; width: number; height: number; rotation: number },
+  ) => void;
   onSelectOverlay: (overlayId: string | null) => void;
   onDoubleClickOverlay?: (overlayId: string) => void;
   onUpdateCursor: (x: number, y: number) => void;
   onHideCursor: () => void;
   onTransformChange?: (transform: CanvasTransform) => void;
-  /** 投げ縄: ストローク移動（元ストローク群, 移動後ストローク群） */
-  onLassoMove?: (originalStrokes: DrawEvent[], movedStrokes: DrawEvent[]) => void;
-  /** 投げ縄: ストローク削除 */
-  onLassoDelete?: (strokes: DrawEvent[]) => void;
+  /** 投げ縄: 選択状態変更通知 */
+  onLassoSelectionChange?: (selection: LassoSelection | null) => void;
+  /** 投げ縄: ストローク+オーバーレイ移動 */
+  onLassoMove?: (
+    originalStrokes: DrawEvent[], movedStrokes: DrawEvent[],
+    overlayDeltas: Array<{overlayId: string; dx: number; dy: number}>,
+  ) => void;
+  /** 投げ縄: ストローク+オーバーレイ削除 */
+  onLassoDelete?: (strokes: DrawEvent[], overlayIds: string[]) => void;
+  /** 外部から投げ縄選択を設定（複製/貼り付け後の選択状態反映用） */
+  externalLassoSelection?: LassoSelection | null;
 }
 
 export function WhiteboardCanvas({
@@ -80,25 +85,25 @@ export function WhiteboardCanvas({
   strokeWidth,
   sessionId,
   selectedOverlayId,
-  overlayImages,
+  overlayDisplayStates,
   overlayAssetTypes,
   overlayOpacityOverrides,
   overlayLockAspectRatios,
-  loadingOverlayIds,
-  missingOverlayIds,
   backgroundConfig,
   canvasSize,
   onAddDrawEvent,
-  onAddEraseEvent,
-  onRemoveOverlayEvent,
+  onEraseStrokes,
+  onRemoveOverlay,
   onTransformOverlay,
   onSelectOverlay,
   onDoubleClickOverlay,
   onUpdateCursor,
   onHideCursor,
   onTransformChange,
+  onLassoSelectionChange,
   onLassoMove,
   onLassoDelete,
+  externalLassoSelection,
 }: WhiteboardCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -125,6 +130,7 @@ export function WhiteboardCanvas({
   const lassoPathRef = useRef<Point[]>([]);
   const [lassoPath, setLassoPath] = useState<Point[]>([]);
   const [lassoSelectedIds, setLassoSelectedIds] = useState<Set<string>>(new Set());
+  const [lassoSelectedOverlayIds, setLassoSelectedOverlayIds] = useState<Set<string>>(new Set());
   const lassoDragStartRef = useRef<Point | null>(null);
   const [lassoDragOffset, setLassoDragOffset] = useState<Point | null>(null);
   // 投げ縄リサイズ
@@ -136,6 +142,7 @@ export function WhiteboardCanvas({
   useEffect(() => {
     if (tool !== 'lasso') {
       setLassoSelectedIds(new Set());
+      setLassoSelectedOverlayIds(new Set());
       setLassoPath([]);
       lassoPathRef.current = [];
       lassoDragStartRef.current = null;
@@ -145,6 +152,25 @@ export function WhiteboardCanvas({
       setLassoScalePreview(null);
     }
   }, [tool]);
+
+  // 投げ縄選択状態を親に通知
+  useEffect(() => {
+    if (lassoSelectedIds.size === 0 && lassoSelectedOverlayIds.size === 0) {
+      onLassoSelectionChange?.(null);
+    } else {
+      onLassoSelectionChange?.({ strokeIds: lassoSelectedIds, overlayIds: lassoSelectedOverlayIds });
+    }
+  }, [lassoSelectedIds, lassoSelectedOverlayIds, onLassoSelectionChange]);
+
+  // 外部からの投げ縄選択設定（複製/貼り付け後の選択状態反映）
+  const prevExternalSelectionRef = useRef<LassoSelection | null | undefined>(undefined);
+  useEffect(() => {
+    if (externalLassoSelection !== prevExternalSelectionRef.current && externalLassoSelection) {
+      setLassoSelectedIds(externalLassoSelection.strokeIds);
+      setLassoSelectedOverlayIds(externalLassoSelection.overlayIds);
+    }
+    prevExternalSelectionRef.current = externalLassoSelection;
+  }, [externalLassoSelection]);
 
   // Shift キー監視
   // transform 変化を親に通知（ボードサムネイル解像度更新用）
@@ -314,8 +340,15 @@ export function WhiteboardCanvas({
       
       // ドラッグ中は dragPreview の位置を使用
       const isBeingDragged = selectedOverlayId === overlay.overlayId && dragPreview;
-      const displayX = isBeingDragged ? dragPreview.x : overlay.x;
-      const displayY = isBeingDragged ? dragPreview.y : overlay.y;
+      // 投げ縄ドラッグ中のオフセット
+      const isLassoDragged = lassoSelectedOverlayIds.has(overlay.overlayId) && lassoDragOffset;
+      let displayX = isBeingDragged ? dragPreview.x : overlay.x;
+      let displayY = isBeingDragged ? dragPreview.y : overlay.y;
+      if (isLassoDragged) {
+        displayX += lassoDragOffset.x;
+        displayY += lassoDragOffset.y;
+        ctx.globalAlpha *= 0.7; // ドラッグ中は半透明
+      }
       const displayWidth = isBeingDragged ? dragPreview.width : overlay.width;
       const displayHeight = isBeingDragged ? dragPreview.height : overlay.height;
       
@@ -328,10 +361,11 @@ export function WhiteboardCanvas({
         ctx.translate(-centerX, -centerY);
       }
       
-      const img = overlayImages.get(overlay.overlayId);
-      const isLoading = loadingOverlayIds?.has(overlay.overlayId) ?? false;
+      const displayState = overlayDisplayStates.get(overlay.overlayId);
+      const img = displayState?.image;
+      const status = displayState?.status ?? 'loading';
 
-      if (img && img.complete) {
+      if (img && img.complete && (status === 'ready' || status === 'loading')) {
         const assetType = overlayAssetTypes.get(overlay.overlayId) ?? 'image';
         // board タイプは viewport がサムネイルに焼き込まれているのでそのまま描画
         // image/document タイプは viewport を source rect として指定（高解像度維持）
@@ -346,29 +380,58 @@ export function WhiteboardCanvas({
         }
 
         // ローディング中: 既存画像の上に半透明オーバーレイ + スピナー
-        if (isLoading) {
+        if (status === 'loading') {
           drawLoadingOverlay(ctx, displayX, displayY, displayWidth, displayHeight, transform.scale, true);
         }
-      } else {
-        const isMissing = missingOverlayIds?.has(overlay.overlayId) ?? false;
-        // プレースホルダー矩形
-        ctx.fillStyle = isMissing ? '#fef2f2' : '#e5e7eb';
+      } else if (status === 'transferring') {
+        // P2P 転送中: プレースホルダー + プログレスバー
+        ctx.fillStyle = '#eff6ff';
         ctx.fillRect(displayX, displayY, displayWidth, displayHeight);
-        ctx.strokeStyle = isMissing ? '#f87171' : '#9ca3af';
+        ctx.strokeStyle = '#60a5fa';
         ctx.lineWidth = 1 / transform.scale;
         ctx.strokeRect(displayX, displayY, displayWidth, displayHeight);
-
-        if (isMissing) {
-          // "Asset not found" テキスト
-          const fontSize = Math.max(Math.min(displayWidth * 0.08, 14 / transform.scale), 8 / transform.scale);
-          ctx.font = `${fontSize}px sans-serif`;
-          ctx.fillStyle = '#dc2626';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText('Asset not found', displayX + displayWidth / 2, displayY + displayHeight / 2);
-        } else {
-          drawLoadingOverlay(ctx, displayX, displayY, displayWidth, displayHeight, transform.scale, false);
-        }
+        // プログレスバー
+        const barH = Math.max(4 / transform.scale, 2);
+        const barY = displayY + displayHeight / 2 - barH / 2;
+        const progress = displayState?.progress ?? 0;
+        ctx.fillStyle = '#dbeafe';
+        ctx.fillRect(displayX + 4 / transform.scale, barY, displayWidth - 8 / transform.scale, barH);
+        ctx.fillStyle = '#3b82f6';
+        ctx.fillRect(displayX + 4 / transform.scale, barY, (displayWidth - 8 / transform.scale) * progress, barH);
+        // パーセンテージ
+        const fontSize = Math.max(Math.min(displayWidth * 0.08, 12 / transform.scale), 8 / transform.scale);
+        ctx.font = `${fontSize}px sans-serif`;
+        ctx.fillStyle = '#2563eb';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(`${Math.round(progress * 100)}%`, displayX + displayWidth / 2, barY - 2 / transform.scale);
+        // ラベル
+        ctx.textBaseline = 'top';
+        ctx.fillText('取得中…', displayX + displayWidth / 2, barY + barH + 2 / transform.scale);
+      } else if (status === 'error') {
+        // エラー: 赤プレースホルダー
+        ctx.fillStyle = '#fef2f2';
+        ctx.fillRect(displayX, displayY, displayWidth, displayHeight);
+        ctx.strokeStyle = '#f87171';
+        ctx.lineWidth = 1 / transform.scale;
+        ctx.strokeRect(displayX, displayY, displayWidth, displayHeight);
+        const fontSize = Math.max(Math.min(displayWidth * 0.08, 14 / transform.scale), 8 / transform.scale);
+        ctx.font = `${fontSize}px sans-serif`;
+        ctx.fillStyle = '#dc2626';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const msg = displayState?.errorReason === 'decodeFailed' ? 'Decode failed'
+          : displayState?.errorReason === 'peerDisconnected' ? 'Peer disconnected'
+          : 'Asset not found';
+        ctx.fillText(msg, displayX + displayWidth / 2, displayY + displayHeight / 2);
+      } else {
+        // requesting / loading（画像なし）
+        ctx.fillStyle = '#e5e7eb';
+        ctx.fillRect(displayX, displayY, displayWidth, displayHeight);
+        ctx.strokeStyle = '#9ca3af';
+        ctx.lineWidth = 1 / transform.scale;
+        ctx.strokeRect(displayX, displayY, displayWidth, displayHeight);
+        drawLoadingOverlay(ctx, displayX, displayY, displayWidth, displayHeight, transform.scale, false);
       }
       
       // 選択枠を描画
@@ -411,8 +474,8 @@ export function WhiteboardCanvas({
       ctx.stroke();
     }
 
-    // 投げ縄: 選択ストロークのハイライト
-    if (lassoSelectedIds.size > 0) {
+    // 投げ縄: 選択ストローク+オーバーレイのハイライト
+    if (lassoSelectedIds.size > 0 || lassoSelectedOverlayIds.size > 0) {
       const dx = lassoDragOffset?.x ?? 0;
       const dy = lassoDragOffset?.y ?? 0;
       const sp = lassoScalePreview; // { sx, sy, ox, oy } | null
@@ -431,6 +494,28 @@ export function WhiteboardCanvas({
           bMaxX = Math.max(bMaxX, stroke.bbox[2]);
           bMaxY = Math.max(bMaxY, stroke.bbox[3]);
         }
+      }
+      // オーバーレイの BBox も含める
+      for (const overlay of activeOverlays) {
+        if (!lassoSelectedOverlayIds.has(overlay.overlayId)) continue;
+        bMinX = Math.min(bMinX, overlay.x);
+        bMinY = Math.min(bMinY, overlay.y);
+        bMaxX = Math.max(bMaxX, overlay.x + overlay.width);
+        bMaxY = Math.max(bMaxY, overlay.y + overlay.height);
+      }
+
+      // 選択オーバーレイのハイライト描画
+      for (const overlay of activeOverlays) {
+        if (!lassoSelectedOverlayIds.has(overlay.overlayId)) continue;
+        ctx.save();
+        ctx.globalAlpha = isTransforming ? 0.6 : 1;
+        const ox = overlay.x + dx;
+        const oy = overlay.y + dy;
+        // ブルーハロ枠
+        ctx.strokeStyle = 'rgba(59, 130, 246, 0.5)';
+        ctx.lineWidth = 2 / transform.scale;
+        ctx.strokeRect(ox, oy, overlay.width, overlay.height);
+        ctx.restore();
       }
 
       // ストローク描画（移動/スケール適用）
@@ -544,7 +629,7 @@ export function WhiteboardCanvas({
     }
     
     ctx.restore();
-  }, [activeStrokes, activeOverlays, overlayImages, overlayAssetTypes, overlayOpacityOverrides, loadingOverlayIds, missingOverlayIds, selectedOverlayId, dragPreview, currentStroke, transform, cursors, drawLoadingOverlay, drawSpinner, canvasSize, backgroundConfig, lassoPath, lassoSelectedIds, lassoDragOffset, lassoScalePreview]);
+  }, [activeStrokes, activeOverlays, overlayDisplayStates, overlayAssetTypes, overlayOpacityOverrides, selectedOverlayId, dragPreview, currentStroke, transform, cursors, drawLoadingOverlay, drawSpinner, canvasSize, backgroundConfig, lassoPath, lassoSelectedIds, lassoSelectedOverlayIds, lassoDragOffset, lassoScalePreview]);
 
   // 描画ループ
   useEffect(() => {
@@ -597,16 +682,9 @@ export function WhiteboardCanvas({
     }
 
     if (strokesToErase.length > 0) {
-      const event: EraseEvent = {
-        type: 'E',
-        timestamp: getTimestamp(),
-        sessionId,
-        id: generateEraseId(),
-        targetIds: strokesToErase.map(s => s.id),
-      };
-      onAddEraseEvent(event, strokesToErase);
+      onEraseStrokes(strokesToErase);
     }
-  }, [activeStrokes, strokeWidth, sessionId, onAddEraseEvent]);
+  }, [activeStrokes, strokeWidth, sessionId, onEraseStrokes]);
 
   // ポインタダウン
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
@@ -738,8 +816,8 @@ export function WhiteboardCanvas({
     }
 
     if (tool === 'lasso') {
-      // 選択済みストロークがある場合
-      if (lassoSelectedIds.size > 0) {
+      // 選択済みストローク/オーバーレイがある場合
+      if (lassoSelectedIds.size > 0 || lassoSelectedOverlayIds.size > 0) {
         const selStrokes = activeStrokes.filter(s => lassoSelectedIds.has(s.id));
         let bMinX = Infinity, bMinY = Infinity, bMaxX = -Infinity, bMaxY = -Infinity;
         for (const s of selStrokes) {
@@ -747,6 +825,11 @@ export function WhiteboardCanvas({
             bMinX = Math.min(bMinX, s.bbox[0]); bMinY = Math.min(bMinY, s.bbox[1]);
             bMaxX = Math.max(bMaxX, s.bbox[2]); bMaxY = Math.max(bMaxY, s.bbox[3]);
           }
+        }
+        for (const ov of activeOverlays) {
+          if (!lassoSelectedOverlayIds.has(ov.overlayId)) continue;
+          bMinX = Math.min(bMinX, ov.x); bMinY = Math.min(bMinY, ov.y);
+          bMaxX = Math.max(bMaxX, ov.x + ov.width); bMaxY = Math.max(bMaxY, ov.y + ov.height);
         }
         if (bMinX !== Infinity) {
           const pad = 6 / transform.scale;
@@ -785,13 +868,14 @@ export function WhiteboardCanvas({
         }
         // bbox 外クリック → 選択解除して新規投げ縄開始
         setLassoSelectedIds(new Set());
+        setLassoSelectedOverlayIds(new Set());
         setLassoScalePreview(null);
       }
       // 投げ縄パス描画開始
       lassoPathRef.current = [point];
       setLassoPath([point]);
     }
-  }, [tool, color, strokeWidth, screenToCanvas, eraseAtPoint, activeOverlays, activeStrokes, selectedOverlayId, transform.scale, onSelectOverlay, lassoSelectedIds]);
+  }, [tool, color, strokeWidth, screenToCanvas, eraseAtPoint, activeOverlays, activeStrokes, selectedOverlayId, transform.scale, onSelectOverlay, lassoSelectedIds, lassoSelectedOverlayIds]);
 
   // ポインタ移動
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
@@ -1053,18 +1137,11 @@ export function WhiteboardCanvas({
         dragPreview.width !== before.width ||
         dragPreview.height !== before.height
       ) {
-        const event: OverlayTransformEvent = {
-          type: 'OT',
-          timestamp: getTimestamp(),
-          sessionId,
-          overlayId: selectedOverlayId,
-          x: dragPreview.x,
-          y: dragPreview.y,
-          width: dragPreview.width,
-          height: dragPreview.height,
-          rotation: selectedOverlay?.rotation ?? 0,
-        };
-        onTransformOverlay(event, before);
+        onTransformOverlay(
+          selectedOverlayId,
+          { x: before.x, y: before.y, width: before.width, height: before.height, rotation: selectedOverlay?.rotation ?? 0 },
+          { x: dragPreview.x, y: dragPreview.y, width: dragPreview.width, height: dragPreview.height, rotation: selectedOverlay?.rotation ?? 0 },
+        );
       }
       
       dragModeRef.current = 'none';
@@ -1100,7 +1177,8 @@ export function WhiteboardCanvas({
 
     if (tool === 'lasso') {
       const mode = lassoResizeModeRef.current;
-      if (lassoDragStartRef.current && lassoSelectedIds.size > 0 && mode !== 'none') {
+      const hasSelection = lassoSelectedIds.size > 0 || lassoSelectedOverlayIds.size > 0;
+      if (lassoDragStartRef.current && hasSelection && mode !== 'none') {
         const originals = activeStrokes.filter(s => lassoSelectedIds.has(s.id));
 
         if (mode === 'move' && lassoDragOffset) {
@@ -1116,11 +1194,19 @@ export function WhiteboardCanvas({
               path: offsetSvgPath(s.path, dx, dy),
               bbox: s.bbox ? [s.bbox[0] + dx, s.bbox[1] + dy, s.bbox[2] + dx, s.bbox[3] + dy] as [number, number, number, number] : s.bbox,
             }));
-            onLassoMove?.(originals, moved);
+            // オーバーレイのデルタ
+            const overlayDeltas: Array<{overlayId: string; dx: number; dy: number}> = [];
+            for (const ov of activeOverlays) {
+              if (lassoSelectedOverlayIds.has(ov.overlayId)) {
+                overlayDeltas.push({ overlayId: ov.overlayId, dx, dy });
+              }
+            }
+            onLassoMove?.(originals, moved, overlayDeltas);
             setLassoSelectedIds(new Set(moved.map(s => s.id)));
+            // オーバーレイは ID が変わらないので維持
           }
         } else if (lassoScalePreview) {
-          // リサイズコミット
+          // リサイズコミット（ストロークのみ — オーバーレイのリサイズは未対応）
           const { sx, sy, ox, oy } = lassoScalePreview;
           if (Math.abs(sx - 1) > 0.001 || Math.abs(sy - 1) > 0.001) {
             const scaled = originals.map(s => ({
@@ -1137,7 +1223,7 @@ export function WhiteboardCanvas({
                 oy + (s.bbox[3] - oy) * sy,
               ] as [number, number, number, number] : s.bbox,
             }));
-            onLassoMove?.(originals, scaled);
+            onLassoMove?.(originals, scaled, []);
             setLassoSelectedIds(new Set(scaled.map(s => s.id)));
           }
         }
@@ -1160,7 +1246,17 @@ export function WhiteboardCanvas({
             }
           }
         }
+        // オーバーレイも選択判定
+        const selectedOvs = new Set<string>();
+        for (const ov of activeOverlays) {
+          const cx = ov.x + ov.width / 2;
+          const cy = ov.y + ov.height / 2;
+          if (pointInPolygon(cx, cy, polygon)) {
+            selectedOvs.add(ov.overlayId);
+          }
+        }
         setLassoSelectedIds(selected);
+        setLassoSelectedOverlayIds(selectedOvs);
         lassoPathRef.current = [];
         setLassoPath([]);
       } else {
@@ -1168,7 +1264,7 @@ export function WhiteboardCanvas({
         setLassoPath([]);
       }
     }
-  }, [tool, sessionId, selectedOverlayId, activeOverlays, activeStrokes, dragPreview, onAddDrawEvent, onTransformOverlay, lassoSelectedIds, lassoDragOffset, lassoScalePreview, onLassoMove]);
+  }, [tool, sessionId, selectedOverlayId, activeOverlays, activeStrokes, dragPreview, onAddDrawEvent, onTransformOverlay, lassoSelectedIds, lassoSelectedOverlayIds, lassoDragOffset, lassoScalePreview, onLassoMove]);
 
   // ポインタ離脱
   const handlePointerLeave = useCallback((e: React.PointerEvent) => {
@@ -1209,32 +1305,28 @@ export function WhiteboardCanvas({
     return () => canvas.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
 
-  // キーボードイベント（Delete でオーバーレイ削除）
+  // キーボードイベント（Delete で選択削除）
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedOverlayId) {
-          const removeEvent: OverlayRemoveEvent = {
-            type: 'OR',
-            timestamp: getTimestamp(),
-            sessionId,
-            removeId: `r:${Date.now().toString(36)}`,
-            targetOverlayIds: [selectedOverlayId],
-          };
-          onRemoveOverlayEvent(removeEvent);
+          onRemoveOverlay(selectedOverlayId);
           onSelectOverlay(null);
         }
-        if (lassoSelectedIds.size > 0 && onLassoDelete) {
-          const toDelete = activeStrokes.filter(s => lassoSelectedIds.has(s.id));
-          if (toDelete.length > 0) {
-            onLassoDelete(toDelete);
+        if ((lassoSelectedIds.size > 0 || lassoSelectedOverlayIds.size > 0) && onLassoDelete) {
+          const toDeleteStrokes = activeStrokes.filter(s => lassoSelectedIds.has(s.id));
+          const toDeleteOverlayIds = Array.from(lassoSelectedOverlayIds);
+          if (toDeleteStrokes.length > 0 || toDeleteOverlayIds.length > 0) {
+            onLassoDelete(toDeleteStrokes, toDeleteOverlayIds);
             setLassoSelectedIds(new Set());
+            setLassoSelectedOverlayIds(new Set());
           }
         }
       }
       if (e.key === 'Escape') {
         onSelectOverlay(null);
         setLassoSelectedIds(new Set());
+        setLassoSelectedOverlayIds(new Set());
         setLassoPath([]);
         lassoPathRef.current = [];
       }
@@ -1242,7 +1334,7 @@ export function WhiteboardCanvas({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedOverlayId, sessionId, onRemoveOverlayEvent, onSelectOverlay, lassoSelectedIds, activeStrokes, onLassoDelete]);
+  }, [selectedOverlayId, sessionId, onRemoveOverlay, onSelectOverlay, lassoSelectedIds, lassoSelectedOverlayIds, activeStrokes, onLassoDelete]);
 
   // ダブルクリックでオーバーレイを編集
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {

@@ -12,7 +12,8 @@ import {
 } from '../utils';
 import { generateUuid } from '../utils/common';
 import { computeState, getActiveStrokes, getActiveOverlays } from '../utils/statemachine';
-import { getTimestamp, generateSnapshotId } from '../utils/common';
+import { minimizeWbelx } from '../utils/minimize';
+import { getTimestamp, generateSnapshotId, generateRemoveId, generateBatchId } from '../utils/common';
 import {
   saveProjectConfig,
   loadProjectConfig,
@@ -78,6 +79,7 @@ interface ProjectState {
   updateBackground: (bg: Partial<BackgroundConfig>) => Promise<void>;
   deleteBoard: (boardId: string) => Promise<void>;
   duplicateBoard: (boardId: string) => Promise<string | null>;
+  minimizeBoard: (boardId: string, targetBoardId?: string) => Promise<{ beforeEventCount: number; afterEventCount: number; activeStrokeCount: number; activeOverlayCount: number } | null>;
   updateBoardEvents: (boardId: string, events: WbelxEvent[]) => Promise<void>;
   getBoardEvents: (boardId: string) => WbelxEvent[];
   loadBoardEventsAsync: (boardId: string) => Promise<WbelxEvent[]>;
@@ -513,14 +515,33 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
           .filter(o => o.assetUuid === deletedUuid)
           .map(o => o.overlayId);
         if (overlaysToRemove.length > 0) {
-          const removeEvent: WbelxEvent = {
-            type: 'OR',
-            timestamp: getTimestamp(),
-            sessionId: 'system',
-            removeId: `r:${generateUuid().slice(0, 8)}`,
-            targetOverlayIds: overlaysToRemove,
-          };
-          const updatedEvents = [...events, removeEvent];
+          const ts = getTimestamp();
+          let removeEvents: WbelxEvent[];
+          if (overlaysToRemove.length === 1) {
+            removeEvents = [{
+              type: 'OR',
+              timestamp: ts,
+              sessionId: 'system',
+              removeId: generateRemoveId(),
+              targetOverlayId: overlaysToRemove[0],
+            }];
+          } else {
+            const subEvents = overlaysToRemove.map(oid => ({
+              type: 'OR' as const,
+              timestamp: ts,
+              sessionId: 'system',
+              removeId: generateRemoveId(),
+              targetOverlayId: oid,
+            }));
+            removeEvents = [{
+              type: 'BATCH',
+              id: generateBatchId(),
+              timestamp: ts,
+              sessionId: 'system',
+              events: subEvents,
+            }];
+          }
+          const updatedEvents = [...events, ...removeEvents];
           newBoards.set(otherBoardId, updatedEvents);
           await saveBoardEvents(otherBoardId, updatedEvents);
           // assetIndex の referencedBy を更新
@@ -716,6 +737,9 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     const boardAsset: import('../types').WbAsset = {
       uuid: newUuid,
       type: 'board',
+      originalName: `${srcInfo.name} (copy)`,
+      mimeType: 'application/x-wbelx',
+      fileSize: 0,
       relativePath: `boards/${nextId}.wbelx`,
       referencedBy: [],
       allAncestors: [],
@@ -745,6 +769,63 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     }
 
     return nextId;
+  },
+
+  /**
+   * ボードを Minimize する（破壊的操作）。
+   * targetBoardId が指定されている場合はそのボードを上書き。
+   * 指定がない場合は元のボード自体を上書き。
+   */
+  minimizeBoard: async (boardId: string, targetBoardId?: string) => {
+    const { project } = get();
+    if (!project) return null;
+
+    const srcEvents = project.boards.get(boardId);
+    if (!srcEvents || srcEvents.length === 0) return null;
+
+    const srcInfo = project.config.boards.get(boardId);
+    if (!srcInfo) return null;
+
+    // Minimize 実行
+    const result = minimizeWbelx(srcEvents);
+
+    const effectiveTargetId = targetBoardId || boardId;
+
+    // ターゲットボードのイベントを更新
+    const newBoards = new Map(project.boards);
+    newBoards.set(effectiveTargetId, result.events);
+
+    // updatedAt を更新
+    const newConfigBoards = new Map(project.config.boards);
+    const targetInfo = newConfigBoards.get(effectiveTargetId);
+    if (targetInfo) {
+      newConfigBoards.set(effectiveTargetId, {
+        ...targetInfo,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    const newProject = {
+      ...project,
+      config: { ...project.config, boards: newConfigBoards },
+      boards: newBoards,
+    };
+
+    set({ project: newProject });
+
+    // IndexedDB に保存
+    await saveProjectConfig(newProject.config);
+    await saveBoardEvents(effectiveTargetId, result.events);
+
+    // スナップショットをクリア（イベントが変わったため）
+    await deleteBoardSnapshot(effectiveTargetId);
+
+    return {
+      beforeEventCount: result.beforeEventCount,
+      afterEventCount: result.afterEventCount,
+      activeStrokeCount: result.activeStrokeCount,
+      activeOverlayCount: result.activeOverlayCount,
+    };
   },
 
   // ボードを S イベント付きで保存し、スナップショットも作成
@@ -936,6 +1017,9 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     const wbasset: WbAsset = {
       uuid,
       type: assetType,
+      originalName: file.name,
+      mimeType,
+      fileSize: file.size,
       relativePath,
       referencedBy: [],
       allAncestors: [],
@@ -948,8 +1032,6 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
       originalPath: file.name,
       importedBy: '',
       importedAt: new Date().toISOString(),
-      mimeType,
-      fileSize: file.size,
     });
     
     // IndexedDB に保存
@@ -1006,9 +1088,9 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
       if (info) {
         assets.push({
           uuid: asset.uuid,
-          fileName: info.originalPath,
-          mimeType: info.mimeType,
-          size: info.fileSize,
+          fileName: asset.originalName || info.originalPath,
+          mimeType: asset.mimeType,
+          size: asset.fileSize,
           type: asset.type as 'image' | 'document',
         });
       }

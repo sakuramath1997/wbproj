@@ -1,24 +1,35 @@
 /**
- * wbelx パーサー・シリアライザー
+ * wbelx パーサー・シリアライザー v4
  *
- * v6/v2 JSONL 形式の読み書き。
- * v5/v1 CSV 形式の後方互換読み込みもサポート。
+ * v4 変更点:
+ * - BATCH イベントの読み書き（サブイベントの timestamp/sessionId hydrate/dehydrate）
+ * - E.targetId 単一対象
+ * - OR.targetOverlayId 単一対象
+ * - OS 単一ターゲット
+ * - CSV 後方互換は旧形式（targetIds 等）から v4 への変換を含む
  */
 
 import type {
   DrawEvent,
   EraseEvent,
   SnapshotMarkerEvent,
-  HeaderEvent,
+  WbelxHeaderEvent,
   OverlayAddEvent,
   OverlayRemoveEvent,
-  OverlayTransformEvent,
-  OverlayViewportEvent,
-  OverlayStyleEvent,
+  BatchEvent,
   WbelxEvent,
+  SubEvent,
   SnapshotHeaderEvent,
   Viewport,
+  BackgroundState,
 } from '../types';
+import { backgroundStateToSnapshotBGEvent } from './statemachine';
+
+// ========================================
+// ホワイトリスト
+// ========================================
+
+const KNOWN_SUB_TYPES = new Set(['D', 'E', 'OA', 'OR', 'OT', 'OV', 'OS', 'BG', 'CS']);
 
 // ========================================
 // JSONL パース
@@ -36,26 +47,60 @@ function parseJsonLine(line: string): WbelxEvent | null {
   }
 
   const type = obj.type as string;
-  if (type === 'H' || type === 'SS') return null; // ヘッダー行は無視
+  if (type === 'H' || type === 'SS') return null;
 
   try {
-    switch (type) {
-      case 'D': return obj as unknown as DrawEvent;
-      case 'E': return obj as unknown as EraseEvent;
-      case 'S': return obj as unknown as SnapshotMarkerEvent;
-      case 'OA': return obj as unknown as OverlayAddEvent;
-      case 'OR': return obj as unknown as OverlayRemoveEvent;
-      case 'OT': return obj as unknown as OverlayTransformEvent;
-      case 'OV': return obj as unknown as OverlayViewportEvent;
-      case 'OS': return obj as unknown as OverlayStyleEvent;
-      default:
-        console.warn(`Unknown event type: ${type}`);
-        return null;
+    if (type === 'BATCH') {
+      return hydrateBatch(obj);
     }
+    if (KNOWN_SUB_TYPES.has(type)) {
+      return obj as unknown as SubEvent;
+    }
+    console.warn(`Unknown event type: ${type}`);
+    return null;
   } catch (e) {
     console.warn(`Failed to parse JSONL line: ${trimmed}`, e);
     return null;
   }
+}
+
+/**
+ * BATCH の JSON オブジェクトをパースし、サブイベントに timestamp/sessionId を hydrate する。
+ */
+function hydrateBatch(obj: Record<string, unknown>): BatchEvent | null {
+  const events = obj.events as Record<string, unknown>[];
+  if (!Array.isArray(events) || events.length < 2) {
+    console.warn('BATCH must contain at least 2 sub-events');
+    return null;
+  }
+
+  const timestamp = obj.timestamp as string;
+  const sessionId = obj.sessionId as string;
+
+  const hydrated: SubEvent[] = [];
+  for (const sub of events) {
+    const subType = sub.type as string;
+    if (!KNOWN_SUB_TYPES.has(subType)) {
+      console.warn(`Unknown sub-event type in BATCH: ${subType}`);
+      continue;
+    }
+    // hydrate: サブイベントに BATCH の timestamp/sessionId を注入
+    hydrated.push({
+      ...sub,
+      timestamp,
+      sessionId,
+    } as unknown as SubEvent);
+  }
+
+  if (hydrated.length < 2) return null;
+
+  return {
+    type: 'BATCH',
+    id: obj.id as string,
+    timestamp,
+    sessionId,
+    events: hydrated,
+  };
 }
 
 // ========================================
@@ -67,6 +112,10 @@ function parseViewportString(str: string): Viewport {
   return { x, y, width, height };
 }
 
+/**
+ * CSV の旧形式 E（targetIds: "s:001;s:002"）を v4 形式に変換する。
+ * 複数対象の場合は BATCH に変換する。
+ */
 function parseCsvLine(line: string): WbelxEvent | null {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith('#')) return null;
@@ -95,14 +144,35 @@ function parseCsvLine(line: string): WbelxEvent | null {
           path,
         } as DrawEvent;
       }
-      case 'E':
+      case 'E': {
+        const ids = parts[4].split(';').filter(Boolean);
+        const timestamp = parts[1];
+        const sessionId = parts[2];
+        const baseId = parts[3];
+        if (ids.length === 1) {
+          return {
+            type: 'E',
+            timestamp,
+            sessionId,
+            id: baseId,
+            targetId: ids[0],
+          } as EraseEvent;
+        }
+        // 複数対象 → BATCH に変換
         return {
-          type: 'E',
-          timestamp: parts[1],
-          sessionId: parts[2],
-          id: parts[3],
-          targetIds: parts[4].split(';').filter(Boolean),
-        } as EraseEvent;
+          type: 'BATCH',
+          id: `b:migrated_${baseId}`,
+          timestamp,
+          sessionId,
+          events: ids.map((targetId, i) => ({
+            type: 'E' as const,
+            timestamp,
+            sessionId,
+            id: i === 0 ? baseId : `${baseId}_${i}`,
+            targetId,
+          })),
+        } as BatchEvent;
+      }
       case 'S':
         return {
           type: 'S',
@@ -127,49 +197,35 @@ function parseCsvLine(line: string): WbelxEvent | null {
           zIndex: parseInt(parts[12], 10),
           opacity: parseFloat(parts[13]),
         } as OverlayAddEvent;
-      case 'OR':
+      case 'OR': {
+        const ids = parts[4].split(';').filter(Boolean);
+        const timestamp = parts[1];
+        const sessionId = parts[2];
+        const baseId = parts[3];
+        if (ids.length === 1) {
+          return {
+            type: 'OR',
+            timestamp,
+            sessionId,
+            removeId: baseId,
+            targetOverlayId: ids[0],
+          } as OverlayRemoveEvent;
+        }
         return {
-          type: 'OR',
-          timestamp: parts[1],
-          sessionId: parts[2],
-          removeId: parts[3],
-          targetOverlayIds: parts[4].split(';').filter(Boolean),
-        } as OverlayRemoveEvent;
-      case 'OT':
-        return {
-          type: 'OT',
-          timestamp: parts[1],
-          sessionId: parts[2],
-          overlayId: parts[3],
-          x: parseFloat(parts[4]),
-          y: parseFloat(parts[5]),
-          width: parseFloat(parts[6]),
-          height: parseFloat(parts[7]),
-          rotation: parseFloat(parts[8]),
-        } as OverlayTransformEvent;
-      case 'OV':
-        return {
-          type: 'OV',
-          timestamp: parts[1],
-          sessionId: parts[2],
-          overlayId: parts[3],
-          viewport: parseViewportString(parts[4]),
-          page: parseInt(parts[5], 10),
-        } as OverlayViewportEvent;
-      case 'OS':
-        // v1 CSV: 単一ターゲット → v2 形式に変換
-        return {
-          type: 'OS',
-          timestamp: parts[1],
-          sessionId: parts[2],
-          targets: [{
-            overlayId: parts[3],
-            zIndex: parseInt(parts[4], 10),
-            opacity: parseFloat(parts[5]),
-          }],
-        } as OverlayStyleEvent;
+          type: 'BATCH',
+          id: `b:migrated_${baseId}`,
+          timestamp,
+          sessionId,
+          events: ids.map((targetOverlayId, i) => ({
+            type: 'OR' as const,
+            timestamp,
+            sessionId,
+            removeId: i === 0 ? baseId : `${baseId}_${i}`,
+            targetOverlayId,
+          })),
+        } as BatchEvent;
+      }
       default:
-        console.warn(`Unknown CSV event type: ${type}`);
         return null;
     }
   } catch (e) {
@@ -179,29 +235,23 @@ function parseCsvLine(line: string): WbelxEvent | null {
 }
 
 // ========================================
-// ファイル全体パース（v5/v6 自動判別）
+// ファイル全体パース
 // ========================================
 
 export function parseWbelx(content: string): WbelxEvent[] {
   return parseWbelxWithHeader(content).events;
 }
 
-/** パース結果（ヘッダー付き） */
 export interface ParsedWbelx {
-  header: HeaderEvent | null;
+  header: WbelxHeaderEvent | null;
   snapshotHeader: SnapshotHeaderEvent | null;
   events: WbelxEvent[];
 }
 
-/**
- * ファイル全体をパースし、ヘッダー情報も返す。
- * H/SS 行があれば header/snapshotHeader に格納し、それ以外を events に収める。
- * .wbelx / .snapshot.wbelx 両方に対応。
- */
 export function parseWbelxWithHeader(content: string): ParsedWbelx {
   const lines = content.split('\n');
   const events: WbelxEvent[] = [];
-  let header: HeaderEvent | null = null;
+  let header: WbelxHeaderEvent | null = null;
   let snapshotHeader: SnapshotHeaderEvent | null = null;
 
   const firstLine = lines.find(l => l.trim() && !l.trim().startsWith('#') && !l.trim().startsWith('//'));
@@ -214,7 +264,13 @@ export function parseWbelxWithHeader(content: string): ParsedWbelx {
       try {
         const obj = JSON.parse(trimmed);
         if (obj.type === 'H' && !header) {
-          header = { type: 'H', version: obj.version ?? 1, createdAt: obj.createdAt ?? '' };
+          header = {
+            type: 'H',
+            version: obj.version ?? 1,
+            createdAt: obj.createdAt ?? '',
+            canvasWidth: obj.canvasWidth ?? 0,
+            canvasHeight: obj.canvasHeight ?? 0,
+          };
           continue;
         }
         if (obj.type === 'SS' && !snapshotHeader) {
@@ -231,16 +287,40 @@ export function parseWbelxWithHeader(content: string): ParsedWbelx {
 }
 
 // ========================================
-// シリアライズ（v2 JSONL）
+// シリアライズ（v4 JSONL）
 // ========================================
 
+/**
+ * イベントを JSONL 1行にシリアライズする。
+ * BATCH のサブイベントからは timestamp/sessionId を除去する。
+ */
 export function eventToJsonl(event: WbelxEvent): string {
+  if (event.type === 'BATCH') {
+    // サブイベントから timestamp/sessionId を dehydrate
+    const dehydrated = event.events.map(sub => {
+      const { timestamp: _t, sessionId: _s, ...rest } = sub as SubEvent & { timestamp: string; sessionId: string };
+      return rest;
+    });
+    return JSON.stringify({
+      type: 'BATCH',
+      id: event.id,
+      timestamp: event.timestamp,
+      sessionId: event.sessionId,
+      events: dehydrated,
+    });
+  }
   return JSON.stringify(event);
 }
 
-export function eventsToWbelx(events: WbelxEvent[]): string {
-  const header = JSON.stringify({ type: 'H', version: 2, createdAt: new Date().toISOString() });
-  const lines = [header, ...events.map(eventToJsonl)];
+export function eventsToWbelx(events: WbelxEvent[], canvasWidth = 0, canvasHeight = 0): string {
+  const header: WbelxHeaderEvent = {
+    type: 'H',
+    version: 4,
+    createdAt: new Date().toISOString(),
+    canvasWidth,
+    canvasHeight,
+  };
+  const lines = [JSON.stringify(header), ...events.map(eventToJsonl)];
   return lines.join('\n');
 }
 
@@ -249,7 +329,6 @@ export function eventsToWbelx(events: WbelxEvent[]): string {
 // ========================================
 
 export function parseSnapshot(content: string): { hash: string; events: WbelxEvent[] } | null {
-  // v1 CSV スナップショット（後方互換）
   const firstLine = content.split('\n')[0]?.trim();
   if (firstLine?.startsWith('#SNAPSHOT,')) {
     const hash = firstLine.slice('#SNAPSHOT,'.length);
@@ -257,7 +336,6 @@ export function parseSnapshot(content: string): { hash: string; events: WbelxEve
     return { hash, events };
   }
 
-  // v2 JSONL: parseWbelxWithHeader に委譲
   const parsed = parseWbelxWithHeader(content);
   if (parsed.snapshotHeader) {
     return { hash: parsed.snapshotHeader.hash, events: parsed.events };
@@ -266,13 +344,25 @@ export function parseSnapshot(content: string): { hash: string; events: WbelxEve
   return null;
 }
 
-export function createSnapshot(events: WbelxEvent[], hash: string): string {
-  const header = JSON.stringify({ type: 'SS', version: 2, hash, createdAt: new Date().toISOString() });
+export function createSnapshot(
+  events: WbelxEvent[],
+  hash: string,
+  background?: BackgroundState | null
+): string {
+  const header = JSON.stringify({ type: 'SS', version: 4, hash, createdAt: new Date().toISOString() });
   const lines = [header];
   for (const event of events) {
     if (event.type === 'D' || event.type === 'OA') {
       lines.push(eventToJsonl(event));
     }
   }
+
+  if (background) {
+    const bgSnap = backgroundStateToSnapshotBGEvent(
+      background, new Date().toISOString(), '__snapshot__', 'bg:snapshot'
+    );
+    if (bgSnap) lines.push(eventToJsonl(bgSnap));
+  }
+
   return lines.join('\n');
 }

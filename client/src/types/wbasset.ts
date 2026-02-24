@@ -1,5 +1,5 @@
 /**
- * Whiteboard Asset Metadata (.wbasset) v1 型定義
+ * Whiteboard Asset Metadata (.wbasset) v2 型定義
  */
 
 // ========================================
@@ -16,6 +16,9 @@ export type AssetType = 'board' | 'image' | 'document';
 export interface WbAsset {
   uuid: string;
   type: AssetType;
+  originalName: string;       // 元のファイル名
+  mimeType: string;           // MIME type (e.g. "image/png")
+  fileSize: number;           // バイト数
   relativePath: string;
   referencedBy: string[];    // このアセットを overlay として載せているボードの UUID
   allAncestors: string[];    // 全ての祖先ボードの UUID（キャッシュ）
@@ -183,6 +186,9 @@ export function wbassetToToml(asset: WbAsset): string {
     '[asset]',
     `uuid = "${asset.uuid}"`,
     `type = "${asset.type}"`,
+    `original_name = "${asset.originalName}"`,
+    `mime_type = "${asset.mimeType}"`,
+    `file_size = ${asset.fileSize}`,
     `relative_path = "${asset.relativePath}"`,
     `referenced_by = [${asset.referencedBy.map(s => `"${s}"`).join(', ')}]`,
     `all_ancestors = [${asset.allAncestors.map(s => `"${s}"`).join(', ')}]`,

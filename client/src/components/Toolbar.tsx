@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import type { ToolType, StrokeWidthKey } from '../types';
+import type { ToolType, StrokeWidthKey, BackgroundConfig, BackgroundPattern } from '../types';
 import { COLOR_PALETTE, STROKE_WIDTHS } from '../types';
 
 interface ToolbarProps {
@@ -28,6 +28,8 @@ interface ToolbarProps {
   availableAssets?: Array<{ uuid: string; fileName: string; type: 'image' | 'document' | 'board' }>;
   canvasSize?: { width: number; height: number };
   onCanvasSizeChange?: (width: number | undefined, height: number | undefined) => void;
+  backgroundConfig?: BackgroundConfig;
+  onBackgroundChange?: (config: BackgroundConfig) => void;
 }
 
 export function Toolbar({
@@ -56,10 +58,13 @@ export function Toolbar({
   availableAssets = [],
   canvasSize,
   onCanvasSizeChange,
+  backgroundConfig,
+  onBackgroundChange,
 }: ToolbarProps) {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showAssetMenu, setShowAssetMenu] = useState(false);
   const [showCanvasSizeMenu, setShowCanvasSizeMenu] = useState(false);
+  const [showBgMenu, setShowBgMenu] = useState(false);
   const [customWidth, setCustomWidth] = useState('');
   const [customHeight, setCustomHeight] = useState('');
   const [linkCopied, setLinkCopied] = useState(false);
@@ -406,6 +411,114 @@ export function Toolbar({
                     </button>
                   </div>
                 </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Background settings */}
+      {onBackgroundChange && backgroundConfig && (
+        <div style={{ position: 'relative' }}>
+          <button
+            className="toolbar-action-btn"
+            onClick={() => setShowBgMenu(!showBgMenu)}
+            title="Background settings"
+          >
+            <span style={{
+              display: 'inline-block', width: 12, height: 12, borderRadius: 2,
+              backgroundColor: backgroundConfig.color, border: '1px solid #9ca3af',
+              verticalAlign: 'middle', marginRight: 4,
+            }} />
+            BG
+          </button>
+          {showBgMenu && (
+            <>
+              <div
+                className="dropdown-backdrop"
+                onClick={() => setShowBgMenu(false)}
+              />
+              <div className="dropdown-menu" style={{ right: 0, minWidth: 220, padding: '8px 12px' }}>
+                {/* Background color */}
+                <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>Background color</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                  <input
+                    type="color"
+                    value={backgroundConfig.color}
+                    onChange={e => onBackgroundChange({ ...backgroundConfig, color: e.target.value })}
+                    style={{ width: 28, height: 28, padding: 0, border: '1px solid #d1d5db', borderRadius: 4, cursor: 'pointer' }}
+                  />
+                  <input
+                    type="text"
+                    value={backgroundConfig.color}
+                    onChange={e => {
+                      const v = e.target.value;
+                      if (/^#[0-9a-fA-F]{6}$/.test(v)) onBackgroundChange({ ...backgroundConfig, color: v });
+                    }}
+                    style={{ width: 72, padding: '2px 4px', fontSize: 12, border: '1px solid #d1d5db', borderRadius: 3, fontFamily: 'monospace' }}
+                  />
+                  {backgroundConfig.color !== '#ffffff' && (
+                    <button
+                      className="toolbar-btn"
+                      style={{ fontSize: 11, padding: '2px 6px' }}
+                      onClick={() => onBackgroundChange({ ...backgroundConfig, color: '#ffffff' })}
+                      title="Reset to white"
+                    >↺</button>
+                  )}
+                </div>
+
+                {/* Pattern */}
+                <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>Pattern</div>
+                <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+                  {(['none', 'dots', 'grid', 'lines'] as BackgroundPattern[]).map(p => (
+                    <button
+                      key={p}
+                      className={`toolbar-btn ${backgroundConfig.pattern === p ? 'active' : ''}`}
+                      style={{
+                        flex: 1, fontSize: 11, padding: '3px 0',
+                        backgroundColor: backgroundConfig.pattern === p ? '#dbeafe' : undefined,
+                        borderColor: backgroundConfig.pattern === p ? '#3b82f6' : undefined,
+                      }}
+                      onClick={() => onBackgroundChange({ ...backgroundConfig, pattern: p })}
+                    >
+                      {p === 'none' ? '—' : p === 'dots' ? '··' : p === 'grid' ? '⊞' : '∥'} {p}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Pattern size & color (only when pattern != none) */}
+                {backgroundConfig.pattern !== 'none' && (
+                  <>
+                    <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>Pattern size: {backgroundConfig.patternSize}px</div>
+                    <input
+                      type="range"
+                      min={5}
+                      max={100}
+                      value={backgroundConfig.patternSize}
+                      onChange={e => onBackgroundChange({ ...backgroundConfig, patternSize: Number(e.target.value) })}
+                      style={{ width: '100%', marginBottom: 8 }}
+                    />
+
+                    <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>Pattern color</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                      <input
+                        type="color"
+                        value={backgroundConfig.patternColor}
+                        onChange={e => onBackgroundChange({ ...backgroundConfig, patternColor: e.target.value })}
+                        style={{ width: 28, height: 28, padding: 0, border: '1px solid #d1d5db', borderRadius: 4, cursor: 'pointer' }}
+                      />
+                      <input
+                        type="text"
+                        value={backgroundConfig.patternColor}
+                        onChange={e => {
+                          const v = e.target.value;
+                          if (/^#[0-9a-fA-F]{6}$/.test(v)) onBackgroundChange({ ...backgroundConfig, patternColor: v });
+                        }}
+                        style={{ width: 72, padding: '2px 4px', fontSize: 12, border: '1px solid #d1d5db', borderRadius: 3, fontFamily: 'monospace' }}
+                      />
+                    </div>
+                  </>
+                )}
               </div>
             </>
           )}

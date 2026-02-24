@@ -60,6 +60,9 @@ export function createNewProject(name: string): Project {
   const boardAsset: WbAsset = {
     uuid: boardUuid,
     type: 'board',
+    originalName: 'Board 1',
+    mimeType: 'application/wbelx',
+    fileSize: 0,
     relativePath: `boards/${boardId}.wbelx`,
     referencedBy: [],
     allAncestors: [],
@@ -96,6 +99,9 @@ export function addBoard(project: Project, name: string): string {
   const boardAsset: WbAsset = {
     uuid: boardUuid,
     type: 'board',
+    originalName: name,
+    mimeType: 'application/wbelx',
+    fileSize: 0,
     relativePath: `boards/${newId}.wbelx`,
     referencedBy: [],
     allAncestors: [],
@@ -179,7 +185,7 @@ export async function loadProject(file: File): Promise<Project> {
   // wbproj-spec-v3: assets/<uuid>.<ext> フラット構造
   // v1 互換: imported/images/..., imported/documents/... もフォールバック検索
   const assetFiles = new Map<string, { data: ArrayBuffer; mimeType: string; fileName: string }>();
-  for (const [uuid, assetInfo] of config.assets) {
+  for (const [uuid] of config.assets) {
     const asset = assetIndex.byUuid.get(uuid);
     const relativePath = asset?.relativePath || `assets/${uuid}`;
     const assetFile = zip.file(relativePath)
@@ -189,7 +195,7 @@ export async function loadProject(file: File): Promise<Project> {
       const data = await assetFile.async('arraybuffer');
       assetFiles.set(uuid, {
         data,
-        mimeType: assetInfo.mimeType,
+        mimeType: asset?.mimeType || 'application/octet-stream',
         fileName: assetFile.name.split('/').pop() || uuid,
       });
     }

@@ -2,26 +2,31 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useProjectStore } from '../hooks/useProjectStore';
 import { useYjs } from '../hooks/useYjs';
+import { useP2pAssetTransfer } from '../hooks/useP2pAssetTransfer';
+import type { OverlayDisplayState } from '../types/overlay-display';
+import { createRequestingState, createReadyState, createErrorState, createTransferringState } from '../types/overlay-display';
 import { WhiteboardCanvas } from '../components/WhiteboardCanvas';
 import { Toolbar } from '../components/Toolbar';
 import { OverlayInlineControls } from '../components/OverlayInlineControls';
 import { ViewportEditor } from '../components/ViewportEditor';
+import { LassoActionBar } from '../components/LassoActionBar';
 import type { 
   ToolType, 
   StrokeWidthKey, 
   WbelxEvent, 
   SnapshotMarkerEvent,
   OverlayAddEvent,
-  OverlayRemoveEvent,
-  OverlayTransformEvent,
-  OverlayViewportEvent,
-  OverlayStyleEvent,
   OverlayState,
   AssetType,
   CanvasTransform,
+  AssetIndex,
+  BackgroundConfig,
+  LassoSelection,
+  LassoClipboard,
+  DrawEvent,
 } from '../types';
 import { STROKE_WIDTHS, COLOR_PALETTE, canAddAsOverlay } from '../types';
-import { getTimestamp, generateSnapshotId } from '../utils/common';
+import { getTimestamp, generateSnapshotId, generateCsOpId, generateBgOpId } from '../utils/common';
 import {
   saveBoardEvents,
   loadBoardEvents,
@@ -47,7 +52,7 @@ export function BoardEditor() {
   const { boardId } = useParams<{ boardId: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { project, getBoardUuid, getAssets, getBoards, onAssetAddedToBoard, onAssetRemovedFromBoard, importAsset, loadBoardEventsAsync, regenerateThumbnail, setBoardCanvasSize } = useProjectStore();
+  const { project, getBoardUuid, getAssets, getBoards, onAssetAddedToBoard, onAssetRemovedFromBoard, importAsset, loadBoardEventsAsync, regenerateThumbnail, setBoardCanvasSize, updateBackground } = useProjectStore();
 
   // ツール状態
   const [tool, setTool] = useState<ToolType>('pen');
@@ -64,7 +69,7 @@ export function BoardEditor() {
   
   // オーバーレイ関連
   const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
-  const [overlayImages, setOverlayImages] = useState<Map<string, HTMLImageElement>>(new Map());
+  const [overlayDisplayStates, setOverlayDisplayStates] = useState<Map<string, OverlayDisplayState>>(new Map());
   // overlayId ごとの「最後にレンダリングしたキー」を管理（変更検知用）
   const overlayRenderKeyRef = useRef<Map<string, string>>(new Map());
   // WhiteboardCanvas の現在の transform（ズームレベル変化でボードサムネイルを再生成する）
@@ -72,12 +77,13 @@ export function BoardEditor() {
   const [overlayOpacityOverrides, setOverlayOpacityOverrides] = useState<Map<string, number>>(new Map());
   /** overlayId → AR ロック設定（デフォルト true）。ViewportEditor の適用で更新。 */
   const [overlayLockAspectRatios, setOverlayLockAspectRatios] = useState<Map<string, boolean>>(new Map());
-  /** 画像再生成中の overlayId セット（スピナー表示用） */
-  const [loadingOverlayIds, setLoadingOverlayIds] = useState<Set<string>>(new Set());
-  /** アセットが見つからない overlayId セット（Missing Asset プレースホルダー用） */
-  const [missingOverlayIds, setMissingOverlayIds] = useState<Set<string>>(new Set());
   // インラインコントロールの位置計算用：transform をリアルタイムで反映（パン・ズーム追随）
   const [canvasTransformFull, setCanvasTransformFull] = useState<CanvasTransform>({ x: 0, y: 0, scale: 1 });
+  // 投げ縄選択状態
+  const [lassoSelection, setLassoSelection] = useState<LassoSelection | null>(null);
+  const [lassoClipboard, setLassoClipboard] = useState<LassoClipboard | null>(null);
+  // 複製/貼り付け後に WhiteboardCanvas の選択を外部から設定するための状態
+  const [pendingLassoSelection, setPendingLassoSelection] = useState<LassoSelection | null>(null);
   // サムネイル再生成用：ズームティア変化時のみ更新
   const [canvasTransform, setCanvasTransform] = useState<CanvasTransform>({ x: 0, y: 0, scale: 1 });
   // ズームティアが変化したときのみ canvasTransform を更新（サムネイル再生成をスロットリング）
@@ -97,18 +103,16 @@ export function BoardEditor() {
   const [viewportEditorOverlayId, setViewportEditorOverlayId] = useState<string | null>(null);
   const [pdfPageCounts, setPdfPageCounts] = useState<Map<string, number>>(new Map());
 
+  // ゲスト用アセットインデックス（P2P メタデータ受信時に構築）
+  const [guestAssetIndex, setGuestAssetIndex] = useState<AssetIndex | null>(null);
+  // アセット受信バージョン（IndexedDB 保存完了時にインクリメント → 画像再読み込みトリガー）
+  const [assetReceivedVersion, setAssetReceivedVersion] = useState(0);
+
   // ボード情報
   const boardInfo = boardId ? project?.config.boards.get(boardId) : undefined;
   const localBoardUuid = boardId ? getBoardUuid(boardId) : undefined;
 
   // 固定キャンバスサイズ（undefined = 無限キャンバス）
-  const canvasSize = useMemo(() => {
-    if (boardInfo?.canvasWidth && boardInfo?.canvasHeight) {
-      return { width: boardInfo.canvasWidth, height: boardInfo.canvasHeight };
-    }
-    return undefined;
-  }, [boardInfo?.canvasWidth, boardInfo?.canvasHeight]);
-  
   // 共有リンク判定
   const roomIdFromQuery = searchParams.get('room');
   const isJoiningViaShareLink = !!roomIdFromQuery;
@@ -180,17 +184,20 @@ export function BoardEditor() {
   const {
     isConnected,
     peerCount,
+    state,
     activeStrokes,
     activeOverlays,
     cursors,
     sessionId,
     addDrawEvent,
-    addEraseEvent,
+    eraseStrokes,
     addOverlayEvent,
-    removeOverlayEvent,
+    removeOverlay,
     transformOverlayEvent,
     viewportOverlayEvent,
-    styleOverlayEvent,
+    styleOverlays,
+    addBackgroundEvent,
+    addCanvasSizeEvent,
     performUndo,
     performRedo,
     canUndo,
@@ -206,15 +213,14 @@ export function BoardEditor() {
     isHostConnected,
     guestsPresent,
     events,
-    // アセット転送
-    incomingAssetRequests,
-    receivedAssets,
-    requestAsset,
-    sendAssetResponse,
-    clearAssetRequest,
+    // アセット転送（旧 awareness 方式 → P2P Data Channel に移行済み）
     // 投げ縄
-    lassoMoveStrokes,
-    lassoDeleteStrokes,
+    lassoMoveSelection,
+    lassoDeleteSelection,
+    lassoDuplicateSelection,
+    lassoPasteSelection,
+    // P2P
+    provider,
   } = useYjs({
     roomId,
     enabled: !!roomId && !isLoading,
@@ -224,9 +230,56 @@ export function BoardEditor() {
     onPeerLeave: handlePeerLeave,
   });
 
+  const canvasSize = useMemo(() => {
+    // CS イベントによる動的サイズを優先
+    if (state.canvasWidth > 0 && state.canvasHeight > 0) {
+      return { width: state.canvasWidth, height: state.canvasHeight };
+    }
+    // H ヘッダー由来の初期値をフォールバック
+    if (boardInfo?.canvasWidth && boardInfo?.canvasHeight) {
+      return { width: boardInfo.canvasWidth, height: boardInfo.canvasHeight };
+    }
+    return undefined;
+  }, [state.canvasWidth, state.canvasHeight, boardInfo?.canvasWidth, boardInfo?.canvasHeight]);
+
+  // ========================================
+  // P2P アセット転送（Data Channel 経由）
+  // ========================================
+  const getAssetIndexForP2p = useCallback(() => project?.assetIndex ?? null, [project]);
+
+  const handleProjectMetaReceived = useCallback((index: AssetIndex) => {
+    setGuestAssetIndex(index);
+  }, []);
+
+  const handleAssetReceived = useCallback((_uuid: string) => {
+    // IndexedDB 保存完了 → バージョンをインクリメントして画像再読み込みをトリガー
+    setAssetReceivedVersion(v => v + 1);
+  }, []);
+
+  const {
+    requestAsset: requestAssetP2p,
+    transferProgress: assetTransferProgress,
+  } = useP2pAssetTransfer({
+    provider,
+    isHost,
+    getAssetIndex: getAssetIndexForP2p,
+    onProjectMetaReceived: handleProjectMetaReceived,
+    onAssetReceived: handleAssetReceived,
+  });
+
+  /** ホスト or ゲスト共通のアセットインデックス */
+  const resolvedAssetIndex = project?.assetIndex ?? guestAssetIndex;
+
   // ========================================
   // オーバーレイ画像の読み込み
-  // overlayImages は overlayId をキーとする。
+  // overlayDisplayStates から画像のみ抽出（エクスポート用）
+  const overlayImages = useMemo(() => {
+    const map = new Map<string, HTMLImageElement>();
+    for (const [id, ds] of overlayDisplayStates) {
+      if (ds.image) map.set(id, ds.image);
+    }
+    return map;
+  }, [overlayDisplayStates]);
   // レンダリングキー（assetUuid + page + viewport）が変化した場合に再生成。
   // ========================================
   useEffect(() => {
@@ -372,14 +425,14 @@ export function BoardEditor() {
       // サブオーバーレイのアセットタイプをマップで管理（描画時に board と非board を区別）
       const subAssetTypeMap = new Map<string, AssetType>();
       for (const subOv of boardSubOverlays) {
-        const subAsset = project?.assetIndex.byUuid.get(subOv.assetUuid);
+        const subAsset = resolvedAssetIndex?.byUuid.get(subOv.assetUuid);
         subAssetTypeMap.set(subOv.overlayId, subAsset?.type ?? 'image');
       }
 
       // サブオーバーレイ画像を並列ロード
       const subImgMap = new Map<string, HTMLImageElement>();
       await Promise.all(boardSubOverlays.map(async (subOv) => {
-        const subAsset = project?.assetIndex.byUuid.get(subOv.assetUuid);
+        const subAsset = resolvedAssetIndex?.byUuid.get(subOv.assetUuid);
         if (!subAsset) return;
         let subImg: HTMLImageElement | null = null;
         try {
@@ -451,16 +504,14 @@ export function BoardEditor() {
     // メイン: 各 overlay のレンダリングキーを確認し、必要なものを再生成
     // ----------------------------------------------------------------
     const loadImages = async () => {
-      const newImages = new Map<string, HTMLImageElement>(); // overlayId → image
+      const newStates = new Map<string, OverlayDisplayState>();
       const missingUuids: string[] = [];
-      const newMissingOverlayIds = new Set<string>();
 
       for (const overlay of activeOverlays) {
-        const asset = project?.assetIndex.byUuid.get(overlay.assetUuid);
+        const asset = resolvedAssetIndex?.byUuid.get(overlay.assetUuid);
         const assetType = asset?.type ?? 'image';
 
         // レンダリングキー（viewport + page + assetUuid + zoomTier が変わったら再生成）
-        // zoomTier: ボードサムネイルのみ対象。log2 で 2 段階ごとに再生成（0.5x, 1x, 2x, 4x...）
         const displayPixels = overlay.width * canvasTransform.scale;
         const zoomTier = assetType === 'board' ? Math.ceil(Math.log2(Math.max(displayPixels, 1))) : 0;
         const vpKey = `${overlay.viewport.x},${overlay.viewport.y},${overlay.viewport.width},${overlay.viewport.height}`;
@@ -471,11 +522,10 @@ export function BoardEditor() {
           : `img:${overlay.assetUuid}`;
 
         const prevKey = overlayRenderKeyRef.current.get(overlay.overlayId);
-        const prevImg = overlayImages.get(overlay.overlayId);
+        const prevState = overlayDisplayStates.get(overlay.overlayId);
 
-        if (prevKey === renderKey && prevImg) {
-          // 変更なし → 既存の image を再利用
-          newImages.set(overlay.overlayId, prevImg);
+        if (prevKey === renderKey && prevState?.status === 'ready' && prevState.image) {
+          newStates.set(overlay.overlayId, prevState);
           continue;
         }
 
@@ -488,77 +538,66 @@ export function BoardEditor() {
             0
           );
           if (!img) {
-            newMissingOverlayIds.add(overlay.overlayId);
+            newStates.set(overlay.overlayId, createErrorState('assetNotFound'));
           }
 
         } else if (assetType === 'document') {
-          // P2P receivedAssets からも試みる
-          let dataUrl = await loadAssetFileAsDataUrl(overlay.assetUuid);
-          if (!dataUrl) {
-            const received = receivedAssets.get(overlay.assetUuid);
-            if (received) {
-              dataUrl = `data:${received.mimeType};base64,${received.data}`;
-              clearAssetRequest(overlay.assetUuid);
-            }
-          }
+          const dataUrl = await loadAssetFileAsDataUrl(overlay.assetUuid);
           if (dataUrl) {
             try {
               const pdfDoc = await loadPdfDocument(dataUrl);
               img = await renderPdfPage(pdfDoc, overlay.page > 0 ? overlay.page : 1);
               pdfPageCache.set(`${overlay.assetUuid}:${overlay.page || 1}`, img);
-            } catch { /* skip */ }
+            } catch {
+              newStates.set(overlay.overlayId, createErrorState('decodeFailed'));
+            }
           } else {
             missingUuids.push(overlay.assetUuid);
-            newMissingOverlayIds.add(overlay.overlayId);
+            newStates.set(overlay.overlayId, createRequestingState());
           }
 
         } else { // image
-          // P2P receivedAssets からも試みる
           img = await loadRawImage(overlay.assetUuid);
           if (!img) {
-            const received = receivedAssets.get(overlay.assetUuid);
-            if (received) {
-              const fullDataUrl = `data:${received.mimeType};base64,${received.data}`;
-              const rImg = new Image();
-              rImg.src = fullDataUrl;
-              await new Promise<void>(r => { rImg.onload = () => r(); rImg.onerror = () => r(); });
-              rawImageCache.set(overlay.assetUuid, rImg);
-              img = rImg;
-              clearAssetRequest(overlay.assetUuid);
-            } else {
-              missingUuids.push(overlay.assetUuid);
-              newMissingOverlayIds.add(overlay.overlayId);
-            }
+            missingUuids.push(overlay.assetUuid);
+            newStates.set(overlay.overlayId, createRequestingState());
           }
         }
 
         if (img) {
-          newImages.set(overlay.overlayId, img);
+          newStates.set(overlay.overlayId, createReadyState(img));
           overlayRenderKeyRef.current.set(overlay.overlayId, renderKey);
         }
       }
 
-      // 不足アセットをリクエスト（P2P）
-      for (const uuid of missingUuids) requestAsset(uuid);
+      // 不足アセットをリクエスト（P2P Data Channel 経由）
+      for (const uuid of missingUuids) requestAssetP2p(uuid);
 
-      setOverlayImages(newImages);
-      setMissingOverlayIds(newMissingOverlayIds);
-      // 再生成が完了した overlayId を loading から除外
-      if (missingUuids.length === 0) {
-        setLoadingOverlayIds((prev: Set<string>) => {
-          if (prev.size === 0) return prev;
-          const next = new Set<string>(prev);
-          for (const id of next) {
-            if (newImages.has(id)) next.delete(id);
-          }
-          return next.size === prev.size ? prev : next;
-        });
-      }
+      setOverlayDisplayStates(newStates);
     };
 
     loadImages();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeOverlays, receivedAssets, canvasTransform]);
+  }, [activeOverlays, assetReceivedVersion, resolvedAssetIndex, canvasTransform]);
+
+  // P2P 転送進捗を overlayDisplayStates に反映
+  useEffect(() => {
+    if (assetTransferProgress.size === 0) return;
+    setOverlayDisplayStates((prev) => {
+      let changed = false;
+      const next = new Map(prev);
+      for (const overlay of activeOverlays) {
+        const prog = assetTransferProgress.get(overlay.assetUuid);
+        if (!prog) continue;
+        const prevState = prev.get(overlay.overlayId);
+        if (!prevState || prevState.status === 'requesting' || prevState.status === 'transferring') {
+          next.set(overlay.overlayId, createTransferringState(prog.progress));
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [assetTransferProgress, activeOverlays]);
 
   // PDF のページ数を取得
   useEffect(() => {
@@ -573,7 +612,7 @@ export function BoardEditor() {
         }
         
         // PDF かどうか確認
-        const asset = project?.assetIndex.byUuid.get(overlay.assetUuid);
+        const asset = resolvedAssetIndex?.byUuid.get(overlay.assetUuid);
         if (asset?.type !== 'document') continue;
         
         try {
@@ -595,34 +634,9 @@ export function BoardEditor() {
     loadPageCounts();
   }, [activeOverlays, project]);
 
-  // ========================================
-  // アセットリクエストへの応答（ホスト側）
-  // ========================================
-  useEffect(() => {
-    if (incomingAssetRequests.length === 0) return;
-    
-    const respondToRequests = async () => {
-      for (const uuid of incomingAssetRequests) {
-        // 自分が持っているか確認
-        const dataUrl = await loadAssetFileAsDataUrl(uuid);
-        if (dataUrl) {
-          // data:image/png;base64,xxxx の形式からBase64部分を抽出
-          const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-          if (match) {
-            const mimeType = match[1];
-            const base64Data = match[2];
-            sendAssetResponse(uuid, base64Data, mimeType);
-          }
-        }
-      }
-    };
-    
-    respondToRequests();
-  }, [incomingAssetRequests, sendAssetResponse]);
-
   // アセット追加ハンドラ
   const handleAddAsset = useCallback(async (assetUuid: string) => {
-    const asset = project?.assetIndex.byUuid.get(assetUuid);
+    const asset = resolvedAssetIndex?.byUuid.get(assetUuid);
     const assetType = asset?.type || 'image';
 
     const DEFAULT_W = 300;
@@ -731,49 +745,22 @@ export function BoardEditor() {
     }
   }, [sessionId, activeOverlays.length, addOverlayEvent, localBoardUuid, onAssetAddedToBoard, project, getBoards, getBoardUuid, loadBoardSnapshot, loadBoardEventsAsync]);
 
-  // オーバーレイ削除ハンドラ
-  const handleRemoveOverlay = useCallback((event: OverlayRemoveEvent) => {
-    // 削除対象のオーバーレイデータを取得
-    const targetOverlays: OverlayAddEvent[] = [];
-    const removedAssetUuids: string[] = [];
-    
-    for (const overlayId of event.targetOverlayIds) {
-      const overlay = activeOverlays.find(o => o.overlayId === overlayId);
-      if (overlay) {
-        targetOverlays.push({
-          type: 'OA',
-          timestamp: '',
-          sessionId: '',
-          overlayId: overlay.overlayId,
-          assetUuid: overlay.assetUuid,
-          x: overlay.x,
-          y: overlay.y,
-          width: overlay.width,
-          height: overlay.height,
-          rotation: overlay.rotation,
-          viewport: overlay.viewport,
-          page: overlay.page,
-          zIndex: overlay.zIndex,
-          opacity: overlay.opacity,
-        });
-        removedAssetUuids.push(overlay.assetUuid);
-      }
-    }
-    removeOverlayEvent(event, targetOverlays);
+  // オーバーレイ削除ハンドラ（overlayId を受け取る簡潔なインターフェース）
+  const handleRemoveOverlay = useCallback((overlayId: string) => {
+    const overlay = activeOverlays.find(o => o.overlayId === overlayId);
+    if (!overlay) return;
+    removeOverlay(overlayId);
     
     // アセット参照を更新（ボードネスト用）
     if (localBoardUuid) {
-      for (const assetUuid of removedAssetUuids) {
-        // 同じアセットの他のオーバーレイが残っていないか確認
-        const otherOverlays = activeOverlays.filter(
-          o => o.assetUuid === assetUuid && !event.targetOverlayIds.includes(o.overlayId)
-        );
-        if (otherOverlays.length === 0) {
-          onAssetRemovedFromBoard(localBoardUuid, assetUuid);
-        }
+      const otherOverlays = activeOverlays.filter(
+        o => o.assetUuid === overlay.assetUuid && o.overlayId !== overlayId
+      );
+      if (otherOverlays.length === 0) {
+        onAssetRemovedFromBoard(localBoardUuid, overlay.assetUuid);
       }
     }
-  }, [activeOverlays, removeOverlayEvent, localBoardUuid, onAssetRemovedFromBoard]);
+  }, [activeOverlays, removeOverlay, localBoardUuid, onAssetRemovedFromBoard]);
 
   // 選択中のオーバーレイ情報（インラインコントロール用、後で使用）
   // const selectedOverlay = useMemo(() => {
@@ -837,29 +824,7 @@ export function BoardEditor() {
     if (newAssetUuid && newAssetUuid !== overlay.assetUuid) {
       // アセット変更の場合: OR + OA イベント
       // 古いオーバーレイを削除
-      const removeEvent: OverlayRemoveEvent = {
-        type: 'OR',
-        timestamp: getTimestamp(),
-        sessionId,
-        removeId: `r:${Date.now().toString(36)}`,
-        targetOverlayIds: [overlay.overlayId],
-      };
-      removeOverlayEvent(removeEvent, [{
-        type: 'OA',
-        timestamp: '',
-        sessionId: '',
-        overlayId: overlay.overlayId,
-        assetUuid: overlay.assetUuid,
-        x: overlay.x,
-        y: overlay.y,
-        width: overlay.width,
-        height: overlay.height,
-        rotation: overlay.rotation,
-        viewport: overlay.viewport,
-        page: overlay.page,
-        zIndex: overlay.zIndex,
-        opacity: overlay.opacity,
-      }]);
+      removeOverlay(overlay.overlayId);
       
       // 新しいオーバーレイを追加（overlayTransform があれば適用）
       const newX = overlayTransform?.x ?? overlay.x;
@@ -901,7 +866,7 @@ export function BoardEditor() {
       // -------------------------------------------------------
       let finalOverlayTransform = overlayTransform;
 
-      const assetType = project?.assetIndex.byUuid.get(overlay.assetUuid)?.type;
+      const assetType = resolvedAssetIndex?.byUuid.get(overlay.assetUuid)?.type;
       if (assetType === 'board') {
         // vpOld の優先順:
         //   1. initialBoardViewport: applyInitialFit が決定した実効初期 viewport（最も正確）
@@ -948,54 +913,38 @@ export function BoardEditor() {
 
       // overlayTransform がある場合は OT イベントも発行
       if (finalOverlayTransform) {
-        const transformEvent: OverlayTransformEvent = {
-          type: 'OT',
-          timestamp: getTimestamp(),
-          sessionId,
-          overlayId: overlay.overlayId,
-          x: finalOverlayTransform.x,
-          y: finalOverlayTransform.y,
-          width: finalOverlayTransform.width,
-          height: finalOverlayTransform.height,
-          rotation: overlay.rotation,
-        };
-        transformOverlayEvent(transformEvent, {
-          x: overlay.x,
-          y: overlay.y,
-          width: overlay.width,
-          height: overlay.height,
-          rotation: overlay.rotation,
-        });
+        transformOverlayEvent(
+          overlay.overlayId,
+          { x: overlay.x, y: overlay.y, width: overlay.width, height: overlay.height, rotation: overlay.rotation },
+          { x: finalOverlayTransform.x, y: finalOverlayTransform.y, width: finalOverlayTransform.width, height: finalOverlayTransform.height, rotation: overlay.rotation },
+        );
       }
 
       // viewport/page 変更
-      const event: OverlayViewportEvent = {
-        type: 'OV',
-        timestamp: getTimestamp(),
-        sessionId,
-        overlayId: overlay.overlayId,
-        viewport,
-        page,
-      };
-
-      viewportOverlayEvent(event, {
-        viewport: overlay.viewport,
-        page: overlay.page,
-      });
+      viewportOverlayEvent(
+        overlay.overlayId,
+        { viewport: overlay.viewport, page: overlay.page },
+        { viewport, page },
+      );
     }
     
     setViewportEditorOverlayId(null);
     // renderKey キャッシュを削除 → 次の loadImages で必ず再生成される
     overlayRenderKeyRef.current.delete(overlay.overlayId);
-    // ローディング表示を開始
-    setLoadingOverlayIds((prev: Set<string>) => new Set([...prev, overlay.overlayId]));
+    // ローディング表示を開始（旧画像を保持して半透明オーバーレイ付きで表示）
+    setOverlayDisplayStates((prev) => {
+      const next = new Map(prev);
+      const prevState = prev.get(overlay.overlayId);
+      next.set(overlay.overlayId, { status: 'loading', image: prevState?.image ?? null });
+      return next;
+    });
     // AR ロック設定を保存
     if (lockAspectRatio !== undefined && overlay.overlayId) {
       setOverlayLockAspectRatios((prev: Map<string, boolean>) => new Map([...prev, [overlay.overlayId, lockAspectRatio]]));
     }
     // ドラッグ状態をリセットするため、選択も解除
     setSelectedOverlayId(null);
-  }, [activeOverlays, viewportEditorOverlayId, sessionId, removeOverlayEvent, addOverlayEvent, transformOverlayEvent, viewportOverlayEvent, localBoardUuid, onAssetRemovedFromBoard, onAssetAddedToBoard, project]);
+  }, [activeOverlays, viewportEditorOverlayId, sessionId, removeOverlay, addOverlayEvent, transformOverlayEvent, viewportOverlayEvent, localBoardUuid, onAssetRemovedFromBoard, onAssetAddedToBoard, project]);
 
   // ViewportEditor 用のオーバーレイ情報
   const viewportEditorOverlay = useMemo(() => {
@@ -1017,31 +966,23 @@ export function BoardEditor() {
   // 透明度変更（スライダー解放時: Undo スタックに乗る）
   const handleOpacityCommit = useCallback((opacity: number) => {
     if (!selectedOverlay) return;
-    const event: OverlayStyleEvent = {
-      type: 'OS',
-      timestamp: getTimestamp(),
-      sessionId,
-      targets: [{ overlayId: selectedOverlay.overlayId, opacity }],
-    };
-    styleOverlayEvent(event, [
-      { overlayId: selectedOverlay.overlayId, before: { opacity: selectedOverlay.opacity } },
-    ]);
+    styleOverlays([{
+      overlayId: selectedOverlay.overlayId,
+      before: { zIndex: selectedOverlay.zIndex, opacity: selectedOverlay.opacity },
+      after: { zIndex: selectedOverlay.zIndex, opacity },
+    }]);
     setOverlayOpacityOverrides(new Map());
-  }, [selectedOverlay, sessionId, styleOverlayEvent]);
+  }, [selectedOverlay, styleOverlays]);
 
   // zIndex 変更ヘルパー（単一ターゲット）
   const changeZIndex = useCallback((newZIndex: number) => {
     if (!selectedOverlay) return;
-    const event: OverlayStyleEvent = {
-      type: 'OS',
-      timestamp: getTimestamp(),
-      sessionId,
-      targets: [{ overlayId: selectedOverlay.overlayId, zIndex: newZIndex }],
-    };
-    styleOverlayEvent(event, [
-      { overlayId: selectedOverlay.overlayId, before: { zIndex: selectedOverlay.zIndex } },
-    ]);
-  }, [selectedOverlay, sessionId, styleOverlayEvent]);
+    styleOverlays([{
+      overlayId: selectedOverlay.overlayId,
+      before: { zIndex: selectedOverlay.zIndex, opacity: selectedOverlay.opacity },
+      after: { zIndex: newZIndex, opacity: selectedOverlay.opacity },
+    }]);
+  }, [selectedOverlay, styleOverlays]);
 
   // z-order: sortedOverlays は zIndex 昇順（getActiveOverlays と同じ順序）
   const sortedOverlays = useMemo(
@@ -1058,41 +999,39 @@ export function BoardEditor() {
     if (!selectedOverlay) return;
     const idx = sortedOverlays.findIndex((o: OverlayState) => o.overlayId === selectedOverlay.overlayId);
     const above = sortedOverlays[idx + 1];
-    // 1本の OS イベントで swap（仕様 §5-2）
-    const event: OverlayStyleEvent = {
-      type: 'OS',
-      timestamp: getTimestamp(),
-      sessionId,
-      targets: [
-        { overlayId: selectedOverlay.overlayId, zIndex: above.zIndex },
-        { overlayId: above.overlayId,            zIndex: selectedOverlay.zIndex },
-      ],
-    };
-    styleOverlayEvent(event, [
-      { overlayId: selectedOverlay.overlayId, before: { zIndex: selectedOverlay.zIndex } },
-      { overlayId: above.overlayId,            before: { zIndex: above.zIndex } },
+    // BATCH で swap（v4: 2つの OS をアトミックに実行）
+    styleOverlays([
+      {
+        overlayId: selectedOverlay.overlayId,
+        before: { zIndex: selectedOverlay.zIndex, opacity: selectedOverlay.opacity },
+        after: { zIndex: above.zIndex, opacity: selectedOverlay.opacity },
+      },
+      {
+        overlayId: above.overlayId,
+        before: { zIndex: above.zIndex, opacity: above.opacity },
+        after: { zIndex: selectedOverlay.zIndex, opacity: above.opacity },
+      },
     ]);
-  }, [selectedOverlay, sortedOverlays, sessionId, styleOverlayEvent]);
+  }, [selectedOverlay, sortedOverlays, styleOverlays]);
 
   const handleSendBackward = useCallback(() => {
     if (!selectedOverlay) return;
     const idx = sortedOverlays.findIndex((o: OverlayState) => o.overlayId === selectedOverlay.overlayId);
     if (idx <= 0) return;
     const below = sortedOverlays[idx - 1];
-    const event: OverlayStyleEvent = {
-      type: 'OS',
-      timestamp: getTimestamp(),
-      sessionId,
-      targets: [
-        { overlayId: selectedOverlay.overlayId, zIndex: below.zIndex },
-        { overlayId: below.overlayId,            zIndex: selectedOverlay.zIndex },
-      ],
-    };
-    styleOverlayEvent(event, [
-      { overlayId: selectedOverlay.overlayId, before: { zIndex: selectedOverlay.zIndex } },
-      { overlayId: below.overlayId,            before: { zIndex: below.zIndex } },
+    styleOverlays([
+      {
+        overlayId: selectedOverlay.overlayId,
+        before: { zIndex: selectedOverlay.zIndex, opacity: selectedOverlay.opacity },
+        after: { zIndex: below.zIndex, opacity: selectedOverlay.opacity },
+      },
+      {
+        overlayId: below.overlayId,
+        before: { zIndex: below.zIndex, opacity: below.opacity },
+        after: { zIndex: selectedOverlay.zIndex, opacity: below.opacity },
+      },
     ]);
-  }, [selectedOverlay, sortedOverlays, sessionId, styleOverlayEvent]);
+  }, [selectedOverlay, sortedOverlays, styleOverlays]);
 
   const handleSendToBack = useCallback(() => {
     const minZ = Math.min(...activeOverlays.map(o => o.zIndex));
@@ -1102,56 +1041,126 @@ export function BoardEditor() {
   // PDF ページ変更（インラインコントロールから）
   const handleInlinePageChange = useCallback((page: number) => {
     if (!selectedOverlay) return;
-    const event: OverlayViewportEvent = {
-      type: 'OV',
-      timestamp: getTimestamp(),
-      sessionId,
-      overlayId: selectedOverlay.overlayId,
-      viewport: selectedOverlay.viewport,
-      page,
-    };
-    viewportOverlayEvent(event, {
-      viewport: selectedOverlay.viewport,
-      page: selectedOverlay.page,
-    });
-  }, [selectedOverlay, sessionId, viewportOverlayEvent]);
+    viewportOverlayEvent(
+      selectedOverlay.overlayId,
+      { viewport: selectedOverlay.viewport, page: selectedOverlay.page },
+      { viewport: selectedOverlay.viewport, page },
+    );
+  }, [selectedOverlay, viewportOverlayEvent]);
 
   // インラインコントロールから削除
   const handleInlineDelete = useCallback(() => {
     if (!selectedOverlayId) return;
     const overlay = activeOverlays.find(o => o.overlayId === selectedOverlayId);
     if (!overlay) return;
-    const removeEvent: OverlayRemoveEvent = {
-      type: 'OR',
-      timestamp: getTimestamp(),
-      sessionId,
-      removeId: `r:${Date.now().toString(36)}`,
-      targetOverlayIds: [selectedOverlayId],
-    };
-    const targetOverlays: OverlayAddEvent[] = [{
-      type: 'OA',
-      timestamp: '',
-      sessionId: '',
-      overlayId: overlay.overlayId,
-      assetUuid: overlay.assetUuid,
-      x: overlay.x, y: overlay.y,
-      width: overlay.width, height: overlay.height,
-      rotation: overlay.rotation,
-      viewport: overlay.viewport,
-      page: overlay.page,
-      zIndex: overlay.zIndex,
-      opacity: overlay.opacity,
-    }];
-    removeOverlayEvent(removeEvent, targetOverlays);
+    removeOverlay(selectedOverlayId);
     setSelectedOverlayId(null);
     if (localBoardUuid) onAssetRemovedFromBoard(localBoardUuid, overlay.assetUuid);
-  }, [selectedOverlayId, activeOverlays, sessionId, removeOverlayEvent, localBoardUuid, onAssetRemovedFromBoard]);
+  }, [selectedOverlayId, activeOverlays, removeOverlay, localBoardUuid, onAssetRemovedFromBoard]);
+
+  // ========================================
+  // 投げ縄アクション
+  // ========================================
+
+  /** 投げ縄 BBox (canvas 座標系) */
+  const lassoCanvasBBox = useMemo((): [number, number, number, number] | null => {
+    if (!lassoSelection) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const stroke of activeStrokes) {
+      if (!lassoSelection.strokeIds.has(stroke.id)) continue;
+      if (stroke.bbox) {
+        minX = Math.min(minX, stroke.bbox[0]); minY = Math.min(minY, stroke.bbox[1]);
+        maxX = Math.max(maxX, stroke.bbox[2]); maxY = Math.max(maxY, stroke.bbox[3]);
+      }
+    }
+    for (const ov of activeOverlays) {
+      if (!lassoSelection.overlayIds.has(ov.overlayId)) continue;
+      minX = Math.min(minX, ov.x); minY = Math.min(minY, ov.y);
+      maxX = Math.max(maxX, ov.x + ov.width); maxY = Math.max(maxY, ov.y + ov.height);
+    }
+    if (minX === Infinity) return null;
+    return [minX, minY, maxX, maxY];
+  }, [lassoSelection, activeStrokes, activeOverlays]);
+
+  /** 選択されたストロークとオーバーレイのデータを取得 */
+  const getLassoSelectedData = useCallback(() => {
+    if (!lassoSelection) return { strokes: [] as DrawEvent[], overlays: [] as OverlayState[] };
+    const strokes = activeStrokes.filter(s => lassoSelection.strokeIds.has(s.id));
+    const overlays = activeOverlays.filter(o => lassoSelection.overlayIds.has(o.overlayId));
+    return { strokes, overlays };
+  }, [lassoSelection, activeStrokes, activeOverlays]);
+
+  /** コピー */
+  const handleLassoCopy = useCallback(() => {
+    const { strokes, overlays } = getLassoSelectedData();
+    if (strokes.length === 0 && overlays.length === 0) return;
+    if (!lassoCanvasBBox) return;
+    setLassoClipboard({ strokes, overlays, canvasBBox: lassoCanvasBBox });
+  }, [getLassoSelectedData, lassoCanvasBBox]);
+
+  /** 複製: ビューポートの左上にペースト */
+  const handleLassoDuplicate = useCallback(() => {
+    const { strokes, overlays } = getLassoSelectedData();
+    if (strokes.length === 0 && overlays.length === 0) return;
+    if (!lassoCanvasBBox) return;
+    // ビューポート左上角(canvas座標系)
+    const vpLeft = -canvasTransformFull.x / canvasTransformFull.scale;
+    const vpTop = -canvasTransformFull.y / canvasTransformFull.scale;
+    const dx = vpLeft - lassoCanvasBBox[0];
+    const dy = vpTop - lassoCanvasBBox[1];
+    const result = lassoDuplicateSelection(strokes, overlays, dx, dy);
+    // 複製した要素を選択状態にする（WhiteboardCanvas に伝達）
+    setPendingLassoSelection({
+      strokeIds: new Set(result.newStrokeIds),
+      overlayIds: new Set(result.newOverlayIds),
+    });
+  }, [getLassoSelectedData, lassoCanvasBBox, canvasTransformFull, lassoDuplicateSelection]);
+
+  /** 削除 */
+  const handleLassoDelete = useCallback(() => {
+    const { strokes, overlays } = getLassoSelectedData();
+    if (strokes.length === 0 && overlays.length === 0) return;
+    lassoDeleteSelection(strokes, overlays.map(o => o.overlayId));
+    setLassoSelection(null);
+  }, [getLassoSelectedData, lassoDeleteSelection]);
+
+  /** 貼り付け (Ctrl+V) */
+  const handleLassoPaste = useCallback(() => {
+    if (!lassoClipboard) return;
+    // ビューポート左上角(canvas座標系)
+    const vpLeft = -canvasTransformFull.x / canvasTransformFull.scale;
+    const vpTop = -canvasTransformFull.y / canvasTransformFull.scale;
+    const dx = vpLeft - lassoClipboard.canvasBBox[0];
+    const dy = vpTop - lassoClipboard.canvasBBox[1];
+    const result = lassoPasteSelection(lassoClipboard.strokes, lassoClipboard.overlays, dx, dy);
+    // 貼り付けた要素を選択状態にする（WhiteboardCanvas に伝達）
+    setPendingLassoSelection({
+      strokeIds: new Set(result.newStrokeIds),
+      overlayIds: new Set(result.newOverlayIds),
+    });
+  }, [lassoClipboard, canvasTransformFull, lassoPasteSelection]);
+
+  // Ctrl+C / Ctrl+V キーボードショートカット
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && lassoSelection) {
+        e.preventDefault();
+        handleLassoCopy();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v' && lassoClipboard) {
+        e.preventDefault();
+        handleLassoPaste();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [lassoSelection, lassoClipboard, handleLassoCopy, handleLassoPaste]);
 
   // overlayId → AssetType のマップ（WhiteboardCanvas に渡して描画時に viewport source rect を使うか判定）
   const overlayAssetTypes = useMemo(() => {
     const map = new Map<string, AssetType>();
     for (const overlay of activeOverlays) {
-      const asset = project?.assetIndex.byUuid.get(overlay.assetUuid);
+      const asset = resolvedAssetIndex?.byUuid.get(overlay.assetUuid);
       map.set(overlay.overlayId, asset?.type ?? 'image');
     }
     return map;
@@ -1340,6 +1349,53 @@ export function BoardEditor() {
     downloadString(svg, `${boardInfo?.name || 'board'}.svg`, 'image/svg+xml');
   }, [activeStrokes, activeOverlays, overlayImages, project?.config.background, canvasSize, boardInfo]);
 
+  // ========================================
+  // 背景変更ハンドラ（Toolbar → デルタ計算 → BG イベント発行）
+  // ========================================
+  const parseHex = (hex: string): { r: number; g: number; b: number } => {
+    const h = hex.replace('#', '');
+    return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
+  };
+
+  const handleBackgroundChange = useCallback((newConfig: BackgroundConfig) => {
+    const cur = project?.config.background;
+    if (!cur) return;
+
+    const curColor = parseHex(cur.color);
+    const newColor = parseHex(newConfig.color);
+    const curPColor = parseHex(cur.patternColor);
+    const newPColor = parseHex(newConfig.patternColor);
+
+    const dColor = (curColor.r !== newColor.r || curColor.g !== newColor.g || curColor.b !== newColor.b)
+      ? { space: 'srgb' as const, dr: newColor.r - curColor.r, dg: newColor.g - curColor.g, db: newColor.b - curColor.b }
+      : undefined;
+    const pattern = cur.pattern !== newConfig.pattern
+      ? { prev: cur.pattern, next: newConfig.pattern }
+      : undefined;
+    const dPatternSize = cur.patternSize !== newConfig.patternSize
+      ? newConfig.patternSize - cur.patternSize
+      : undefined;
+    const dPatternColor = (curPColor.r !== newPColor.r || curPColor.g !== newPColor.g || curPColor.b !== newPColor.b)
+      ? { space: 'srgb' as const, dr: newPColor.r - curPColor.r, dg: newPColor.g - curPColor.g, db: newPColor.b - curPColor.b }
+      : undefined;
+
+    if (!dColor && !pattern && dPatternSize === undefined && !dPatternColor) return;
+
+    addBackgroundEvent({
+      type: 'BG',
+      timestamp: getTimestamp(),
+      sessionId,
+      id: generateBgOpId(),
+      ...(dColor && { dColor }),
+      ...(pattern && { pattern }),
+      ...(dPatternSize !== undefined && { dPatternSize }),
+      ...(dPatternColor && { dPatternColor }),
+    });
+
+    // プロジェクトストアにも反映（永続化用）
+    updateBackground(newConfig);
+  }, [project?.config.background, sessionId, addBackgroundEvent, updateBackground]);
+
   // キーボードショートカット
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1355,6 +1411,9 @@ export function BoardEditor() {
         performRedo();
         return;
       }
+
+      // Ctrl/Meta 修飾キーが押されている場合はツール切替ショートカットをスキップ
+      if (e.ctrlKey || e.metaKey) return;
 
       switch (e.key.toLowerCase()) {
         case 'v': setTool('select'); break;
@@ -1511,7 +1570,26 @@ export function BoardEditor() {
         onImportFile={importAsset}
         availableAssets={availableAssets}
         canvasSize={canvasSize}
-        onCanvasSizeChange={isHost && boardId ? (w, h) => setBoardCanvasSize(boardId, w, h) : undefined}
+        onCanvasSizeChange={isHost && boardId ? (w, h) => {
+          const newW = w ?? 0;
+          const newH = h ?? 0;
+          const dW = newW - state.canvasWidth;
+          const dH = newH - state.canvasHeight;
+          if (dW !== 0 || dH !== 0) {
+            addCanvasSizeEvent({
+              type: 'CS',
+              timestamp: getTimestamp(),
+              sessionId,
+              id: generateCsOpId(),
+              ...(dW !== 0 && { dCanvasWidth: dW }),
+              ...(dH !== 0 && { dCanvasHeight: dH }),
+            });
+            // プロジェクトストアにも反映（永続化用）
+            setBoardCanvasSize(boardId, newW, newH);
+          }
+        } : undefined}
+        backgroundConfig={project?.config.background}
+        onBackgroundChange={isHost ? handleBackgroundChange : undefined}
       />
       <main className={`canvas-container ${isHostPreparing ? 'preparing' : ''}`} style={{ position: 'relative' }}>
         <WhiteboardCanvas
@@ -1523,25 +1601,32 @@ export function BoardEditor() {
           strokeWidth={STROKE_WIDTHS[strokeWidthKey as StrokeWidthKey]}
           sessionId={sessionId}
           selectedOverlayId={selectedOverlayId}
-          overlayImages={overlayImages}
+          overlayDisplayStates={overlayDisplayStates}
           overlayAssetTypes={overlayAssetTypes}
           overlayOpacityOverrides={overlayOpacityOverrides}
           overlayLockAspectRatios={overlayLockAspectRatios}
-          loadingOverlayIds={loadingOverlayIds}
-          missingOverlayIds={missingOverlayIds}
           backgroundConfig={project?.config.background}
           canvasSize={canvasSize}
           onAddDrawEvent={addDrawEvent}
-          onAddEraseEvent={addEraseEvent}
-          onRemoveOverlayEvent={handleRemoveOverlay}
+          onEraseStrokes={eraseStrokes}
+          onRemoveOverlay={handleRemoveOverlay}
           onTransformOverlay={transformOverlayEvent}
           onSelectOverlay={setSelectedOverlayId}
           onDoubleClickOverlay={(overlayId) => setViewportEditorOverlayId(overlayId)}
           onUpdateCursor={updateCursor}
           onHideCursor={hideCursor}
           onTransformChange={handleTransformChange}
-          onLassoMove={lassoMoveStrokes}
-          onLassoDelete={lassoDeleteStrokes}
+          onLassoSelectionChange={(sel) => {
+            setLassoSelection(sel);
+            // pendingLassoSelection が消費された（WhiteboardCanvas が内部状態を更新した）のでクリア
+            if (pendingLassoSelection) setPendingLassoSelection(null);
+          }}
+          onLassoMove={lassoMoveSelection}
+          onLassoDelete={(strokes, overlayIds) => {
+            lassoDeleteSelection(strokes, overlayIds);
+            setLassoSelection(null);
+          }}
+          externalLassoSelection={pendingLassoSelection}
         />
 
         {/* オーバーレイ選択中: インラインコントロール */}
@@ -1571,6 +1656,17 @@ export function BoardEditor() {
             />
           );
         })()}
+
+        {/* 投げ縄選択中: アクションバー */}
+        {lassoSelection && lassoCanvasBBox && tool === 'lasso' && (
+          <LassoActionBar
+            canvasBBox={lassoCanvasBBox}
+            canvasTransform={canvasTransformFull}
+            onCopy={handleLassoCopy}
+            onDuplicate={handleLassoDuplicate}
+            onDelete={handleLassoDelete}
+          />
+        )}
       </main>
       
       {/* ViewportEditor モーダル */}

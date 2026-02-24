@@ -40,8 +40,13 @@ interface SerializedProjectConfig {
   project: {
     name: string;
     version: string;
+    uuid?: string;          // v4 で追加
     createdAt: string;
     updatedAt: string;
+  };
+  defaults?: {              // v4 で追加
+    canvasWidth: number;
+    canvasHeight: number;
   };
   background: BackgroundConfig;
   rendering?: RenderingConfig;
@@ -60,8 +65,8 @@ interface SerializedProjectConfig {
     originalPath: string;
     importedBy: string;
     importedAt: string;
-    mimeType: string;
-    fileSize: number;
+    mimeType?: string;      // v4 で wbasset に移動（後方互換のため optional）
+    fileSize?: number;      // v4 で wbasset に移動（後方互換のため optional）
   }>;
 }
 
@@ -69,6 +74,7 @@ interface SerializedProjectConfig {
 export async function saveProjectConfig(config: ProjectConfig): Promise<void> {
   const serialized: SerializedProjectConfig = {
     project: config.project,
+    defaults: config.defaults,
     background: config.background,
     rendering: config.rendering,
     collaboration: config.collaboration,
@@ -110,7 +116,14 @@ export async function loadProjectConfig(): Promise<ProjectConfig | null> {
   );
   
   return {
-    project: serialized.project,
+    project: {
+      version: String(serialized.project.version || '4.0'),
+      uuid: String(serialized.project.uuid || ''),
+      name: String(serialized.project.name || 'Untitled'),
+      createdAt: String(serialized.project.createdAt || new Date().toISOString()),
+      updatedAt: String(serialized.project.updatedAt || new Date().toISOString()),
+    },
+    defaults: serialized.defaults || { canvasWidth: 0, canvasHeight: 0 },
     background: serialized.background || DEFAULT_BACKGROUND,
     rendering: serialized.rendering || { ...DEFAULT_RENDERING, boardOverlayFallbackViewport: { ...DEFAULT_RENDERING.boardOverlayFallbackViewport } },
     collaboration: serialized.collaboration || DEFAULT_COLLABORATION,

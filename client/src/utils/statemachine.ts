@@ -1,8 +1,11 @@
 /**
- * wbelx ステートマシン v2
+ * wbelx ステートマシン v4
  *
- * OT/OV は差分適用、OS は複数ターゲット対応。
- * zIndex 一意性制約: OS 適用は zIndex 降順で行い中間状態の衝突を防ぐ。
+ * v3.1 → v4 変更点:
+ * - E: targetId 単一対象
+ * - OR: targetOverlayId 単一対象
+ * - OS: 単一ターゲット（overlayId, dzIndex?, dOpacity?）
+ * - BATCH: サブイベントを逐次適用
  */
 
 import type {
@@ -11,7 +14,26 @@ import type {
   WbelxState,
   OverlayState,
   OverlayAddEvent,
+  BackgroundState,
+  BackgroundEvent,
+  ViewportDelta,
+  Viewport,
+  SubEvent,
 } from '../types';
+
+import { BG_SPEC_DEFAULTS } from '../types/wbelx';
+
+// ========================================
+// clamp ヘルパー
+// ========================================
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function clampColor(value: number): number {
+  return Math.round(clamp(value, 0, 255));
+}
 
 // ========================================
 // 初期状態
@@ -23,14 +45,44 @@ export function createInitialState(): WbelxState {
     strokes: new Map(),
     activeOverlayIds: new Set(),
     overlays: new Map(),
+    background: null,
+    canvasWidth: 0,
+    canvasHeight: 0,
   };
 }
 
 // ========================================
-// イベント適用
+// BG 初期化ヘルパー
 // ========================================
 
-export function applyEvent(state: WbelxState, event: WbelxEvent): WbelxState {
+function ensureBackground(bg: BackgroundState | null): BackgroundState {
+  if (bg !== null) return bg;
+  return {
+    color: { ...BG_SPEC_DEFAULTS.color },
+    pattern: BG_SPEC_DEFAULTS.pattern,
+    patternSize: BG_SPEC_DEFAULTS.patternSize,
+    patternColor: { ...BG_SPEC_DEFAULTS.patternColor },
+  };
+}
+
+// ========================================
+// デルタ適用ヘルパー
+// ========================================
+
+function applyViewportDelta(vp: Viewport, d: ViewportDelta): Viewport {
+  return {
+    x:      vp.x      + (d.dx     ?? 0),
+    y:      vp.y      + (d.dy     ?? 0),
+    width:  clamp(vp.width  + (d.dWidth  ?? 0), 1, Infinity),
+    height: clamp(vp.height + (d.dHeight ?? 0), 1, Infinity),
+  };
+}
+
+// ========================================
+// サブイベント適用（BATCH 内部でも使用）
+// ========================================
+
+function applySubEvent(state: WbelxState, event: SubEvent): WbelxState {
   switch (event.type) {
     case 'D': {
       const newStrokes = new Map(state.strokes);
@@ -41,13 +93,11 @@ export function applyEvent(state: WbelxState, event: WbelxEvent): WbelxState {
     }
 
     case 'E': {
+      // v4: 単一対象
       const newActiveIds = new Set(state.activeStrokeIds);
-      for (const id of event.targetIds) newActiveIds.delete(id);
+      newActiveIds.delete(event.targetId);
       return { ...state, activeStrokeIds: newActiveIds };
     }
-
-    case 'S':
-      return state;
 
     case 'OA': {
       const overlayState: OverlayState = {
@@ -58,7 +108,7 @@ export function applyEvent(state: WbelxState, event: WbelxEvent): WbelxState {
         width: event.width,
         height: event.height,
         rotation: event.rotation,
-        viewport: event.viewport,
+        viewport: { ...event.viewport },
         page: event.page,
         zIndex: event.zIndex,
         opacity: event.opacity,
@@ -71,22 +121,22 @@ export function applyEvent(state: WbelxState, event: WbelxEvent): WbelxState {
     }
 
     case 'OR': {
+      // v4: 単一対象
       const newActiveOverlayIds = new Set(state.activeOverlayIds);
-      for (const id of event.targetOverlayIds) newActiveOverlayIds.delete(id);
+      newActiveOverlayIds.delete(event.targetOverlayId);
       return { ...state, activeOverlayIds: newActiveOverlayIds };
     }
 
     case 'OT': {
-      // 差分適用: 存在するフィールドのみ上書き
       const existing = state.overlays.get(event.overlayId);
       if (!existing) return state;
       const updated: OverlayState = {
         ...existing,
-        ...(event.x       !== undefined && { x:        event.x }),
-        ...(event.y       !== undefined && { y:        event.y }),
-        ...(event.width   !== undefined && { width:    event.width }),
-        ...(event.height  !== undefined && { height:   event.height }),
-        ...(event.rotation !== undefined && { rotation: event.rotation }),
+        x:        existing.x        + (event.dx        ?? 0),
+        y:        existing.y        + (event.dy        ?? 0),
+        width:    clamp(existing.width    + (event.dWidth    ?? 0), 1, Infinity),
+        height:   clamp(existing.height   + (event.dHeight   ?? 0), 1, Infinity),
+        rotation: existing.rotation + (event.dRotation ?? 0),
       };
       const newOverlays = new Map(state.overlays);
       newOverlays.set(event.overlayId, updated);
@@ -94,37 +144,71 @@ export function applyEvent(state: WbelxState, event: WbelxEvent): WbelxState {
     }
 
     case 'OV': {
-      // 差分適用
       const existing = state.overlays.get(event.overlayId);
       if (!existing) return state;
-      const updated: OverlayState = {
-        ...existing,
-        ...(event.viewport !== undefined && { viewport: event.viewport }),
-        ...(event.page     !== undefined && { page:     event.page }),
-      };
+      const updated: OverlayState = { ...existing };
+      if (event.dViewport) {
+        updated.viewport = applyViewportDelta(existing.viewport, event.dViewport);
+      }
+      if (event.dPage !== undefined) {
+        updated.page = clamp(existing.page + event.dPage, 1, Infinity);
+      }
       const newOverlays = new Map(state.overlays);
       newOverlays.set(event.overlayId, updated);
       return { ...state, overlays: newOverlays };
     }
 
     case 'OS': {
-      // zIndex 降順でソートして適用（中間状態の一意性維持）
-      const sorted = [...event.targets].sort((a, b) => {
-        const za = a.zIndex ?? -Infinity;
-        const zb = b.zIndex ?? -Infinity;
-        return zb - za;
-      });
+      // v4: 単一ターゲット
+      const existing = state.overlays.get(event.overlayId);
+      if (!existing) return state;
       const newOverlays = new Map(state.overlays);
-      for (const target of sorted) {
-        const existing = newOverlays.get(target.overlayId);
-        if (!existing) continue;
-        newOverlays.set(target.overlayId, {
-          ...existing,
-          ...(target.zIndex  !== undefined && { zIndex:  target.zIndex }),
-          ...(target.opacity !== undefined && { opacity: target.opacity }),
-        });
-      }
+      newOverlays.set(event.overlayId, {
+        ...existing,
+        zIndex:  clamp(existing.zIndex  + (event.dzIndex  ?? 0), 1, Infinity),
+        opacity: clamp(existing.opacity + (event.dOpacity ?? 0), 0.0, 1.0),
+      });
       return { ...state, overlays: newOverlays };
+    }
+
+    case 'BG': {
+      const bg = ensureBackground(state.background);
+      const updated: BackgroundState = { ...bg };
+
+      if (event.dColor) {
+        const c = bg.color!;
+        updated.color = {
+          r: clampColor(c.r + event.dColor.dr),
+          g: clampColor(c.g + event.dColor.dg),
+          b: clampColor(c.b + event.dColor.db),
+        };
+      }
+      if (event.pattern) {
+        updated.pattern = event.pattern.next;
+      }
+      if (event.dPatternSize !== undefined) {
+        updated.patternSize = clamp(bg.patternSize! + event.dPatternSize, 1, Infinity);
+      }
+      if (event.dPatternColor) {
+        const c = bg.patternColor!;
+        updated.patternColor = {
+          r: clampColor(c.r + event.dPatternColor.dr),
+          g: clampColor(c.g + event.dPatternColor.dg),
+          b: clampColor(c.b + event.dPatternColor.db),
+        };
+      }
+
+      return { ...state, background: updated };
+    }
+
+    case 'CS': {
+      const w = event.dCanvasWidth !== undefined
+        ? Math.max(0, state.canvasWidth + event.dCanvasWidth)
+        : state.canvasWidth;
+      const h = event.dCanvasHeight !== undefined
+        ? Math.max(0, state.canvasHeight + event.dCanvasHeight)
+        : state.canvasHeight;
+      return { ...state, canvasWidth: w, canvasHeight: h };
     }
 
     default:
@@ -132,25 +216,50 @@ export function applyEvent(state: WbelxState, event: WbelxEvent): WbelxState {
   }
 }
 
+// ========================================
+// トップレベルイベント適用
+// ========================================
+
+export function applyEvent(state: WbelxState, event: WbelxEvent): WbelxState {
+  switch (event.type) {
+    case 'S':
+      return state;
+
+    case 'BATCH': {
+      // サブイベントを逐次適用
+      let s = state;
+      for (const sub of event.events) {
+        s = applySubEvent(s, sub);
+      }
+      return s;
+    }
+
+    default:
+      // SubEvent（D, E, OA, OR, OT, OV, OS, BG, CS）
+      return applySubEvent(state, event);
+  }
+}
+
+// ========================================
+// 全イベントから状態を再計算
+// ========================================
+
 export function computeState(events: WbelxEvent[]): WbelxState {
   let state = createInitialState();
   for (const event of events) {
     state = applyEvent(state, event);
   }
-  // zIndex 正規化フォールバック: 重複があれば overlayId 辞書順で 1, 2, 3, ... に再割当て
   state = normalizeZIndexIfNeeded(state);
   return state;
 }
 
 /**
  * activeOverlays の zIndex に重複がある場合、overlayId 辞書順昇順で連番を振り直す。
- * 仕様 §5-3 に準拠。
  */
 function normalizeZIndexIfNeeded(state: WbelxState): WbelxState {
   const activeIds = Array.from(state.activeOverlayIds);
   if (activeIds.length <= 1) return state;
 
-  // 重複検出
   const zValues = new Set<number>();
   let hasDuplicate = false;
   for (const id of activeIds) {
@@ -164,7 +273,6 @@ function normalizeZIndexIfNeeded(state: WbelxState): WbelxState {
   }
   if (!hasDuplicate) return state;
 
-  // overlayId 辞書順昇順でソートし、1, 2, 3, ... を割り当て
   const sorted = [...activeIds].sort();
   const newOverlays = new Map(state.overlays);
   sorted.forEach((id, i) => {
@@ -189,7 +297,6 @@ export function getActiveStrokes(state: WbelxState): DrawEvent[] {
   return result;
 }
 
-/** アクティブなオーバーレイを zIndex 昇順で返す */
 export function getActiveOverlays(state: WbelxState): OverlayState[] {
   const result: OverlayState[] = [];
   for (const id of state.activeOverlayIds) {
@@ -220,9 +327,55 @@ export function overlayStateToOAEvent(
     width: overlay.width,
     height: overlay.height,
     rotation: overlay.rotation,
-    viewport: overlay.viewport,
+    viewport: { ...overlay.viewport },
     page: overlay.page,
     zIndex: overlay.zIndex,
     opacity: overlay.opacity,
   };
+}
+
+// ========================================
+// BG 状態からスナップショット用 BG イベントを生成
+// ========================================
+
+export function backgroundStateToSnapshotBGEvent(
+  bg: BackgroundState | null,
+  timestamp: string,
+  sessionId: string,
+  id: string
+): BackgroundEvent | null {
+  if (bg === null) return null;
+
+  const defaults = BG_SPEC_DEFAULTS;
+  const event: BackgroundEvent = {
+    type: 'BG',
+    timestamp,
+    sessionId,
+    id,
+  };
+
+  if (bg.color !== null) {
+    event.dColor = {
+      space: 'srgb',
+      dr: bg.color.r - defaults.color.r,
+      dg: bg.color.g - defaults.color.g,
+      db: bg.color.b - defaults.color.b,
+    };
+  }
+  if (bg.pattern !== null && bg.pattern !== defaults.pattern) {
+    event.pattern = { prev: defaults.pattern, next: bg.pattern };
+  }
+  if (bg.patternSize !== null) {
+    event.dPatternSize = bg.patternSize - defaults.patternSize;
+  }
+  if (bg.patternColor !== null) {
+    event.dPatternColor = {
+      space: 'srgb',
+      dr: bg.patternColor.r - defaults.patternColor.r,
+      dg: bg.patternColor.g - defaults.patternColor.g,
+      db: bg.patternColor.b - defaults.patternColor.b,
+    };
+  }
+
+  return event;
 }

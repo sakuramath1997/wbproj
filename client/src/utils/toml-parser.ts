@@ -7,6 +7,7 @@
 import type {
   ProjectConfig,
   ProjectInfo,
+  DefaultsConfig,
   BackgroundConfig,
   RenderingConfig,
   CollaborationConfig,
@@ -134,6 +135,7 @@ export function parseProjectToml(content: string): ProjectConfig {
   const projectSection = doc['project'] || {};
   const project: ProjectInfo = {
     version: String(projectSection['version'] || '1.0'),
+    uuid: String(projectSection['uuid'] || ''),
     name: String(projectSection['name'] || 'Untitled'),
     createdAt: String(projectSection['created_at'] || new Date().toISOString()),
     updatedAt: String(projectSection['updated_at'] || new Date().toISOString()),
@@ -146,6 +148,13 @@ export function parseProjectToml(content: string): ProjectConfig {
     pattern: (String(bgSection['pattern'] || DEFAULT_BACKGROUND.pattern) as BackgroundPattern),
     patternSize: Number(bgSection['pattern_size'] ?? DEFAULT_BACKGROUND.patternSize),
     patternColor: String(bgSection['pattern_color'] || DEFAULT_BACKGROUND.patternColor),
+  };
+
+  // [defaults]
+  const defaultsSection = doc['defaults'] || {};
+  const defaults: DefaultsConfig = {
+    canvasWidth: Number(defaultsSection['canvas_width'] ?? 0),
+    canvasHeight: Number(defaultsSection['canvas_height'] ?? 0),
   };
 
   // [rendering]
@@ -208,14 +217,13 @@ export function parseProjectToml(content: string): ProjectConfig {
         originalPath: String(section['original_path'] || ''),
         importedBy: String(section['imported_by'] || ''),
         importedAt: String(section['imported_at'] || new Date().toISOString()),
-        mimeType: String(section['mime_type'] || 'application/octet-stream'),
-        fileSize: Number(section['file_size'] ?? 0),
       });
     }
   }
 
   return {
     project,
+    defaults,
     background,
     rendering,
     collaboration,
@@ -244,6 +252,9 @@ export function parseWbasset(content: string): WbAsset | null {
   return {
     uuid: String(assetSection['uuid'] || ''),
     type: String(assetSection['type'] || 'board') as AssetType,
+    originalName: String(assetSection['original_name'] || ''),
+    mimeType: String(assetSection['mime_type'] || 'application/octet-stream'),
+    fileSize: Number(assetSection['file_size'] ?? 0),
     relativePath: String(assetSection['relative_path'] || ''),
     referencedBy: (assetSection['referenced_by'] as string[]) || [],
     allAncestors: (assetSection['all_ancestors'] as string[]) || [],
