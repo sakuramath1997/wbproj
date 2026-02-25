@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { minimizeWbelx } from '../minimize';
-import { computeState } from '../statemachine';
+import { minimizeWbelx } from '../../core/minimize';
+import type { MinimizeDeps } from '../../core/minimize';
+import { computeState } from '../../core/state-machine';
 import { parseWbelx, parseWbelxWithHeader } from '../wbelx-parser';
 import type {
   WbelxEvent,
@@ -14,6 +15,16 @@ import type {
   BatchEvent,
   SubEvent,
 } from '../../types';
+
+// ========================================
+// テスト用 DI deps
+// ========================================
+
+let bgIdCounter = 0;
+const testDeps: MinimizeDeps = {
+  getTimestamp: () => '2026-01-01T12:00:00.000Z',
+  generateBgOpId: () => `bg:test-${++bgIdCounter}`,
+};
 
 // ========================================
 // テストヘルパー
@@ -53,7 +64,7 @@ function makeBatch(subEvents: SubEvent[]): BatchEvent {
 
 describe('minimizeWbelx', () => {
   it('minimizes empty event list', () => {
-    const result = minimizeWbelx([]);
+    const result = minimizeWbelx([], testDeps);
     expect(result.afterEventCount).toBe(0);
     expect(result.activeStrokeCount).toBe(0);
     expect(result.activeOverlayCount).toBe(0);
@@ -67,7 +78,7 @@ describe('minimizeWbelx', () => {
       makeE('e:001', 's:001'), // s:001 消去
     ];
 
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     expect(result.beforeEventCount).toBe(3);
     expect(result.activeStrokeCount).toBe(1);
     expect(result.afterEventCount).toBe(1); // s:002 のみ
@@ -86,7 +97,7 @@ describe('minimizeWbelx', () => {
       makeE('e:001', 's:001'),
     ];
 
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     const parsed = parseWbelx(result.content);
     const types = parsed.map(e => e.type);
     expect(types).not.toContain('E');
@@ -98,7 +109,7 @@ describe('minimizeWbelx', () => {
       { type: 'OT', timestamp: '', sessionId: '', id: 'ot:001', overlayId: 'o:001', dx: 50, dy: 30 } as OverlayTransformEvent,
     ];
 
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     expect(result.activeOverlayCount).toBe(1);
 
     const parsed = parseWbelx(result.content);
@@ -116,7 +127,7 @@ describe('minimizeWbelx', () => {
       { type: 'OR', timestamp: '', sessionId: '', removeId: 'r:001', targetOverlayId: 'o:001' } as OverlayRemoveEvent,
     ];
 
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     expect(result.activeOverlayCount).toBe(1);
 
     const parsed = parseWbelx(result.content);
@@ -133,7 +144,7 @@ describe('minimizeWbelx', () => {
       { type: 'OS', timestamp: '', sessionId: '', id: 'os:001', overlayId: 'o:001', dOpacity: -0.3 } as OverlayStyleEvent,
     ];
 
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     const parsed = parseWbelx(result.content);
     const types = parsed.map(e => e.type);
     expect(types).not.toContain('OT');
@@ -156,7 +167,7 @@ describe('minimizeWbelx', () => {
       } as BackgroundEvent,
     ];
 
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     expect(result.hasBackground).toBe(true);
 
     const parsed = parseWbelx(result.content);
@@ -167,7 +178,7 @@ describe('minimizeWbelx', () => {
 
   it('does not include BG if background is null', () => {
     const events: WbelxEvent[] = [makeD('s:001')];
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     expect(result.hasBackground).toBe(false);
   });
 
@@ -176,7 +187,7 @@ describe('minimizeWbelx', () => {
       makeD('s:001'),
       { type: 'S', timestamp: '', sessionId: '', snapshotHash: 'sha256:test' },
     ];
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     const parsed = parseWbelx(result.content);
     const types = parsed.map(e => e.type);
     expect(types).not.toContain('S');
@@ -192,13 +203,13 @@ describe('minimizeWbelx', () => {
       ]),
     ];
 
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     expect(result.activeStrokeCount).toBe(0);
     expect(result.afterEventCount).toBe(0);
   });
 
   it('preserves canvasWidth and canvasHeight', () => {
-    const result = minimizeWbelx([], 1920, 1080);
+    const result = minimizeWbelx([], testDeps, 1920, 1080);
     const { header } = parseWbelxWithHeader(result.content);
     expect(header).not.toBeNull();
     expect(header!.canvasWidth).toBe(1920);
@@ -220,7 +231,7 @@ describe('minimize equivalence (minimize result == original state)', () => {
     ];
 
     const originalState = computeState(events);
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     const minimizedEvents = parseWbelx(result.content);
     const minimizedState = computeState(minimizedEvents);
 
@@ -241,7 +252,7 @@ describe('minimize equivalence (minimize result == original state)', () => {
     ];
 
     const originalState = computeState(events);
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     const minimizedEvents = parseWbelx(result.content);
     const minimizedState = computeState(minimizedEvents);
 
@@ -269,7 +280,7 @@ describe('minimize equivalence (minimize result == original state)', () => {
     ];
 
     const originalState = computeState(events);
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     const minimizedEvents = parseWbelx(result.content);
     const minimizedState = computeState(minimizedEvents);
 
@@ -296,7 +307,7 @@ describe('minimize equivalence (minimize result == original state)', () => {
     ];
 
     const originalState = computeState(events);
-    const result = minimizeWbelx(events);
+    const result = minimizeWbelx(events, testDeps);
     const minimizedEvents = parseWbelx(result.content);
     const minimizedState = computeState(minimizedEvents);
 

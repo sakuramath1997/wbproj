@@ -6,7 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "check:core": "bash scripts/check-core-constraints.sh",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix"
   },
   "dependencies": {
     "idb-keyval": "^6.2.2",
@@ -20,10 +26,15 @@
     "zustand": "^4.5.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.3",
+    "@types/eslint__js": "^8.42.3",
     "@types/react": "^18.2.55",
     "@types/react-dom": "^18.2.19",
     "@vitejs/plugin-react": "^4.2.1",
+    "eslint": "^9.39.3",
+    "eslint-plugin-react-hooks": "^7.0.1",
     "typescript": "^5.3.3",
+    "typescript-eslint": "^8.56.1",
     "vite": "^7.3.1",
     "vitest": "^4.0.18"
   }

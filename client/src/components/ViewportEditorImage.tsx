@@ -69,12 +69,16 @@ export function ViewportEditorImage({
   const imageRef = useRef<HTMLImageElement | null>(null);
   const canvasSizeRef = useRef(canvasSize);
   const onViewportChangeRef = useRef(onViewportChange);
+  const onAspectRatioDetectedRef = useRef(onAspectRatioDetected);
+  const onNaturalSizeDetectedRef = useRef(onNaturalSizeDetected);
 
   useEffect(() => { transformRef.current = transform; }, [transform]);
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
   useEffect(() => { imageRef.current = image; }, [image]);
   useEffect(() => { canvasSizeRef.current = canvasSize; }, [canvasSize]);
   useEffect(() => { onViewportChangeRef.current = onViewportChange; }, [onViewportChange]);
+  useEffect(() => { onAspectRatioDetectedRef.current = onAspectRatioDetected; }, [onAspectRatioDetected]);
+  useEffect(() => { onNaturalSizeDetectedRef.current = onNaturalSizeDetected; }, [onNaturalSizeDetected]);
 
   // ----------------------------------------------------------------
   // 初期フィット
@@ -137,12 +141,17 @@ export function ViewportEditorImage({
   // 画像読み込み
   // ----------------------------------------------------------------
 
-  useEffect(() => {
+  // assetUuid 変更時のリセット（React recommended: during render）
+  const [prevAssetUuid, setPrevAssetUuid] = useState(assetUuid);
+  if (assetUuid !== prevAssetUuid) {
+    setPrevAssetUuid(assetUuid);
     hasInitialFitRef.current = false;
     setImage(null);
     imageRef.current = null;
     setIsLoading(true);
+  }
 
+  useEffect(() => {
     loadAssetFileAsDataUrl(assetUuid).then((dataUrl) => {
       if (!dataUrl) {
         setIsLoading(false);
@@ -153,14 +162,14 @@ export function ViewportEditorImage({
         imageRef.current = img;
         setImage(img);
         setIsLoading(false);
-        onAspectRatioDetected?.(img.width / img.height);
-        onNaturalSizeDetected?.(img.width, img.height);
+        onAspectRatioDetectedRef.current?.(img.width / img.height);
+        onNaturalSizeDetectedRef.current?.(img.width, img.height);
         // canvas が既に確定していれば即フィット
         applyInitialFit();
       };
       img.src = dataUrl;
     });
-  }, [assetUuid, onAspectRatioDetected, applyInitialFit]);
+  }, [assetUuid, applyInitialFit]);
 
   // ----------------------------------------------------------------
   // 描画

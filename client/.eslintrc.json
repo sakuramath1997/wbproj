@@ -1,0 +1,24 @@
+{
+  "overrides": [
+    {
+      "files": ["src/core/**/*.ts"],
+      "excludedFiles": ["src/core/__tests__/**"],
+      "rules": {
+        "no-restricted-imports": ["error", {
+          "patterns": [
+            { "group": ["react", "react-dom", "react-router*"], "message": "Core 層は React 非依存。hooks/ に移動してください。" },
+            { "group": ["yjs", "y-webrtc", "y-*"], "message": "Core 層は Yjs 非依存。hooks/useYjsSync に移動してください。" }
+          ]
+        }],
+        "no-restricted-globals": ["error",
+          { "name": "document", "message": "Core 層は DOM 非依存。" },
+          { "name": "window", "message": "Core 層は DOM 非依存。" },
+          { "name": "localStorage", "message": "Core 層はブラウザ API 非依存。" },
+          { "name": "sessionStorage", "message": "Core 層はブラウザ API 非依存。" },
+          { "name": "indexedDB", "message": "Core 層はブラウザ API 非依存。" },
+          { "name": "fetch", "message": "Core 層はブラウザ API 非依存。" }
+        ]
+      }
+    }
+  ]
+}

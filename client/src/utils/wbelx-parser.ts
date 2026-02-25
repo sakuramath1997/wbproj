@@ -23,7 +23,11 @@ import type {
   Viewport,
   BackgroundState,
 } from '../types';
-import { backgroundStateToSnapshotBGEvent } from './statemachine';
+import { backgroundStateToSnapshotBGEvent } from '../core/state-machine';
+import { eventToJsonl } from '../core/serializer';
+
+// Re-export for backward compatibility
+export { eventToJsonl } from '../core/serializer';
 
 // ========================================
 // ホワイトリスト
@@ -287,30 +291,8 @@ export function parseWbelxWithHeader(content: string): ParsedWbelx {
 }
 
 // ========================================
-// シリアライズ（v4 JSONL）
+// シリアライズ（v4 JSONL）— eventToJsonl は core/serializer.ts に移動
 // ========================================
-
-/**
- * イベントを JSONL 1行にシリアライズする。
- * BATCH のサブイベントからは timestamp/sessionId を除去する。
- */
-export function eventToJsonl(event: WbelxEvent): string {
-  if (event.type === 'BATCH') {
-    // サブイベントから timestamp/sessionId を dehydrate
-    const dehydrated = event.events.map(sub => {
-      const { timestamp: _t, sessionId: _s, ...rest } = sub as SubEvent & { timestamp: string; sessionId: string };
-      return rest;
-    });
-    return JSON.stringify({
-      type: 'BATCH',
-      id: event.id,
-      timestamp: event.timestamp,
-      sessionId: event.sessionId,
-      events: dehydrated,
-    });
-  }
-  return JSON.stringify(event);
-}
 
 export function eventsToWbelx(events: WbelxEvent[], canvasWidth = 0, canvasHeight = 0): string {
   const header: WbelxHeaderEvent = {

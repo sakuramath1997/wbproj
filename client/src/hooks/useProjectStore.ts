@@ -11,9 +11,9 @@ import {
   getBoardUuid,
 } from '../utils';
 import { generateUuid } from '../utils/common';
-import { computeState, getActiveStrokes, getActiveOverlays } from '../utils/statemachine';
-import { minimizeWbelx } from '../utils/minimize';
-import { getTimestamp, generateSnapshotId, generateRemoveId, generateBatchId } from '../utils/common';
+import { computeState, getActiveStrokes, getActiveOverlays } from '../core/state-machine';
+import { minimizeWbelx } from '../core/minimize';
+import { getTimestamp, generateSnapshotId, generateRemoveId, generateBatchId, generateBgOpId } from '../utils/common';
 import {
   saveProjectConfig,
   loadProjectConfig,
@@ -787,7 +787,7 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     if (!srcInfo) return null;
 
     // Minimize 実行
-    const result = minimizeWbelx(srcEvents);
+    const result = minimizeWbelx(srcEvents, { getTimestamp, generateBgOpId });
 
     const effectiveTargetId = targetBoardId || boardId;
 
@@ -932,7 +932,7 @@ export const useProjectStore = create<ProjectState>((set: (partial: Partial<Proj
     if (!events || events.length === 0) return;
     
     // 末尾から S イベントを探して削除
-    let newEvents = [...events];
+    const newEvents = [...events];
     while (newEvents.length > 0 && newEvents[newEvents.length - 1].type === 'S') {
       newEvents.pop();
     }

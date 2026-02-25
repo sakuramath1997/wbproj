@@ -10,7 +10,7 @@
  *   board    : 透明度 / ViewportEditor（表示領域）/ 削除
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import type { OverlayState, AssetType, CanvasTransform } from '../types';
 
 // ----------------------------------------------------------------
@@ -69,9 +69,12 @@ export function OverlayInlineControls({
   const opacityBeforeRef = useRef(overlay.opacity);
 
   // overlay.opacity が外から変わったとき（Undo/Redo）に同期
-  useEffect(() => {
+  // React recommended: adjust state during render instead of useEffect
+  const [prevOverlayOpacity, setPrevOverlayOpacity] = useState(overlay.opacity);
+  if (overlay.opacity !== prevOverlayOpacity) {
+    setPrevOverlayOpacity(overlay.opacity);
     setLocalOpacity(overlay.opacity);
-  }, [overlay.opacity]);
+  }
 
   // ----------------------------------------------------------------
   // スクリーン座標の計算（canvasTransform からオーバーレイ下端中央を算出）

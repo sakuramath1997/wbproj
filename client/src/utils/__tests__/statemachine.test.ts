@@ -5,7 +5,7 @@ import {
   computeState,
   getActiveOverlays,
   backgroundStateToSnapshotBGEvent,
-} from '../statemachine';
+} from '../../core/state-machine';
 import type {
   OverlayAddEvent,
   OverlayTransformEvent,

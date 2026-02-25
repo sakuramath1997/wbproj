@@ -15,7 +15,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useProjectStore } from '../hooks/useProjectStore';
-import { computeState, getActiveStrokes, getActiveOverlays } from '../utils/statemachine';
+import { computeState, getActiveStrokes, getActiveOverlays } from '../core/state-machine';
 import { loadAssetFileAsDataUrl } from '../utils/storage';
 import { loadPdfDocument, renderPdfPage } from '../utils/pdf';
 import type { DrawEvent, OverlayState } from '../types';
@@ -91,6 +91,7 @@ export function ViewportEditorBoard({
   const viewportRef = useRef(viewport);
   const canvasSizeRef = useRef(canvasSize);
   const onViewportChangeRef = useRef(onViewportChange);
+  const onInitialViewportReadyRef = useRef(onInitialViewportReady);
   const strokesRef = useRef(strokes);
   const overlaysRef = useRef(overlays);
   const overlayImagesRef = useRef(overlayImages);
@@ -99,6 +100,7 @@ export function ViewportEditorBoard({
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
   useEffect(() => { canvasSizeRef.current = canvasSize; }, [canvasSize]);
   useEffect(() => { onViewportChangeRef.current = onViewportChange; }, [onViewportChange]);
+  useEffect(() => { onInitialViewportReadyRef.current = onInitialViewportReady; }, [onInitialViewportReady]);
   useEffect(() => { strokesRef.current = strokes; }, [strokes]);
   useEffect(() => { overlaysRef.current = overlays; }, [overlays]);
   useEffect(() => { overlayImagesRef.current = overlayImages; }, [overlayImages]);
@@ -124,7 +126,7 @@ export function ViewportEditorBoard({
     if (vp.width === 0) {
       onViewportChangeRef.current(fitVp);
       // 実効初期 viewport を BoardEditor に通知（handleApplyViewport の vpOld として使用）
-      onInitialViewportReady?.(fitVp);
+      onInitialViewportReadyRef.current?.(fitVp);
     }
 
     const padding = 80;
@@ -718,7 +720,7 @@ export function ViewportEditorBoard({
         <button className="viewport-editor-btn" onClick={handleFitContent}>内容にフィット</button>
         <button className="viewport-editor-btn" onClick={() => onViewportChange(DEFAULT_BOARD_VIEWPORT)}>リセット</button>
         <span className="viewport-editor-hint">
-          Space + ドラッグでパン　/　Shift + ドラッグでアスペクト比固定
+          Space + ドラッグでパン / Shift + ドラッグでアスペクト比固定
         </span>
       </div>
     </div>

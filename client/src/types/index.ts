@@ -2,10 +2,10 @@
  * 型定義エントリポイント
  */
 
-// wbel v7
+// wbel v8
 export * from './wbel';
 
-// wbelx v3.1 (wbel v7 のスーパーセット)
+// wbelx v4 (wbel v8 のスーパーセット)
 export * from './wbelx';
 
 // wbasset v2

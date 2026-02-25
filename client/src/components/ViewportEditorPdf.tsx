@@ -78,12 +78,16 @@ export function ViewportEditorPdf({
   const pageImageRef = useRef<HTMLImageElement | null>(null);
   const canvasSizeRef = useRef(canvasSize);
   const onViewportChangeRef = useRef(onViewportChange);
+  const onAspectRatioDetectedRef = useRef(onAspectRatioDetected);
+  const onNaturalSizeDetectedRef = useRef(onNaturalSizeDetected);
 
   useEffect(() => { transformRef.current = transform; }, [transform]);
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
   useEffect(() => { pageImageRef.current = pageImage; }, [pageImage]);
   useEffect(() => { canvasSizeRef.current = canvasSize; }, [canvasSize]);
   useEffect(() => { onViewportChangeRef.current = onViewportChange; }, [onViewportChange]);
+  useEffect(() => { onAspectRatioDetectedRef.current = onAspectRatioDetected; }, [onAspectRatioDetected]);
+  useEffect(() => { onNaturalSizeDetectedRef.current = onNaturalSizeDetected; }, [onNaturalSizeDetected]);
 
   // ----------------------------------------------------------------
   // 初期フィット
@@ -144,13 +148,18 @@ export function ViewportEditorPdf({
   // PDF 読み込み
   // ----------------------------------------------------------------
 
-  useEffect(() => {
+  // assetUuid 変更時のリセット（React recommended: during render）
+  const [prevAssetUuid, setPrevAssetUuid] = useState(assetUuid);
+  if (assetUuid !== prevAssetUuid) {
+    setPrevAssetUuid(assetUuid);
     hasInitialFitRef.current = false;
     setPdfDoc(null);
     setPageImage(null);
     pageImageRef.current = null;
     setIsLoadingPdf(true);
+  }
 
+  useEffect(() => {
     loadAssetFileAsDataUrl(assetUuid).then(async (dataUrl) => {
       if (!dataUrl) {
         setIsLoadingPdf(false);
@@ -171,14 +180,22 @@ export function ViewportEditorPdf({
   // ページレンダリング
   // ----------------------------------------------------------------
 
+  // ページ変更時のリセット（React recommended: during render）
+  const [prevPage, setPrevPage] = useState(page);
+  const [prevPdfDoc, setPrevPdfDoc] = useState(pdfDoc);
+  if (page !== prevPage || pdfDoc !== prevPdfDoc) {
+    setPrevPage(page);
+    setPrevPdfDoc(pdfDoc);
+    if (pdfDoc) {
+      hasInitialFitRef.current = false;
+      setPageImage(null);
+      pageImageRef.current = null;
+      setIsLoadingPage(true);
+    }
+  }
+
   useEffect(() => {
     if (!pdfDoc) return;
-
-    // ページが変わったらフィットをリセット
-    hasInitialFitRef.current = false;
-    setPageImage(null);
-    pageImageRef.current = null;
-    setIsLoadingPage(true);
 
     let cancelled = false;
     renderPdfPage(pdfDoc, page).then((img) => {
@@ -186,8 +203,8 @@ export function ViewportEditorPdf({
       pageImageRef.current = img;
       setPageImage(img);
       setIsLoadingPage(false);
-      onAspectRatioDetected?.(img.width / img.height);
-      onNaturalSizeDetected?.(img.width, img.height);
+      onAspectRatioDetectedRef.current?.(img.width / img.height);
+      onNaturalSizeDetectedRef.current?.(img.width, img.height);
       applyInitialFit();
     }).catch((err) => {
       console.error('Failed to render page:', err);
@@ -195,7 +212,7 @@ export function ViewportEditorPdf({
     });
 
     return () => { cancelled = true; };
-  }, [pdfDoc, page, onAspectRatioDetected, applyInitialFit]);
+  }, [pdfDoc, page, applyInitialFit]);
 
   // ----------------------------------------------------------------
   // 描画

@@ -5,9 +5,6 @@
 // 共通ユーティリティ
 export * from './common';
 
-// ステートマシン
-export * from './statemachine';
-
 // wbelx パーサー
 export * from './wbelx-parser';
 

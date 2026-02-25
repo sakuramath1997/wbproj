@@ -20,11 +20,13 @@ export function ProjectDashboard() {
     save, 
     reorderBoards,
     boardThumbnailUrls,
+    setBoardCanvasSize,
   } = useProjectStore();
   const [activeTab, setActiveTab] = useState<TabType>('boards');
   const [sortKey, setSortKey] = useState<BoardSortKey>('displayOrder');
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [editingTitle, setEditingTitle] = useState('');
+  const [showNewBoardDialog, setShowNewBoardDialog] = useState(false);
 
   // project の変更を検知するために project を依存配列に追加
   const boards = useMemo(() => {
@@ -37,12 +39,17 @@ export function ProjectDashboard() {
     navigate('/');
   }, [navigate]);
 
-  const handleAddBoard = useCallback(async () => {
-    const name = prompt('Enter board name:', `Board ${boards.length + 1}`);
-    if (name) {
-      await addBoard(name);
+  const handleAddBoard = useCallback(() => {
+    setShowNewBoardDialog(true);
+  }, []);
+
+  const handleCreateBoard = useCallback(async (name: string, preset: CanvasSizePreset) => {
+    const boardId = await addBoard(name);
+    if (boardId && preset.width > 0 && preset.height > 0) {
+      await setBoardCanvasSize(boardId, preset.width, preset.height);
     }
-  }, [addBoard, boards.length]);
+    setShowNewBoardDialog(false);
+  }, [addBoard, setBoardCanvasSize]);
 
   const handleBoardClick = useCallback((boardId: string) => {
     navigate(`/project/board/${boardId}`);
@@ -206,6 +213,138 @@ export function ProjectDashboard() {
         )}
         {activeTab === 'assets' && <AssetsTab />}
         {activeTab === 'settings' && <SettingsTab />}
+      </div>
+
+      {/* New Board Dialog */}
+      {showNewBoardDialog && (
+        <NewBoardDialog
+          defaultName={`Board ${boards.length + 1}`}
+          onConfirm={handleCreateBoard}
+          onCancel={() => setShowNewBoardDialog(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ========================================
+// Canvas Size Presets
+// ========================================
+
+interface CanvasSizePreset {
+  label: string;
+  width: number;
+  height: number;
+}
+
+const CANVAS_PRESETS: CanvasSizePreset[] = [
+  { label: 'Unlimited (default)',  width: 0,    height: 0 },
+  { label: 'A4 Landscape',        width: 1123, height: 794 },
+  { label: 'A4 Portrait',         width: 794,  height: 1123 },
+  { label: 'A3 Landscape',        width: 1587, height: 1123 },
+  { label: 'HD (1920×1080)',       width: 1920, height: 1080 },
+  { label: '4K (3840×2160)',       width: 3840, height: 2160 },
+  { label: 'Square (1024×1024)',   width: 1024, height: 1024 },
+  { label: 'Custom',              width: -1,   height: -1 },
+];
+
+// ========================================
+// New Board Dialog
+// ========================================
+
+interface NewBoardDialogProps {
+  defaultName: string;
+  onConfirm: (name: string, preset: CanvasSizePreset) => void;
+  onCancel: () => void;
+}
+
+function NewBoardDialog({ defaultName, onConfirm, onCancel }: NewBoardDialogProps) {
+  const [name, setName] = useState(defaultName);
+  const [selectedPresetIndex, setSelectedPresetIndex] = useState(0);
+  const [customWidth, setCustomWidth] = useState(1920);
+  const [customHeight, setCustomHeight] = useState(1080);
+
+  const isCustom = CANVAS_PRESETS[selectedPresetIndex]?.width === -1;
+
+  const handleSubmit = () => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    if (isCustom) {
+      const w = Math.max(0, Math.round(customWidth));
+      const h = Math.max(0, Math.round(customHeight));
+      onConfirm(trimmed, { label: 'Custom', width: w, height: h });
+    } else {
+      onConfirm(trimmed, CANVAS_PRESETS[selectedPresetIndex]);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') handleSubmit();
+    if (e.key === 'Escape') onCancel();
+  };
+
+  return (
+    <div className="dialog-backdrop" onClick={onCancel}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()} onKeyDown={handleKeyDown}>
+        <h2 className="dialog-title">New Board</h2>
+
+        <label className="dialog-label">
+          Board Name
+          <input
+            type="text"
+            className="dialog-input"
+            value={name}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setName(e.target.value)}
+            autoFocus
+          />
+        </label>
+
+        <label className="dialog-label">
+          Canvas Size
+          <select
+            className="dialog-select"
+            value={selectedPresetIndex}
+            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setSelectedPresetIndex(Number(e.target.value))}
+          >
+            {CANVAS_PRESETS.map((p, i) => (
+              <option key={i} value={i}>
+                {p.label}{p.width > 0 ? ` (${p.width}×${p.height})` : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {isCustom && (
+          <div className="dialog-custom-size">
+            <label className="dialog-label">
+              Width (px)
+              <input
+                type="number"
+                className="dialog-input dialog-input-sm"
+                value={customWidth}
+                min={1}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCustomWidth(Number(e.target.value))}
+              />
+            </label>
+            <span className="dialog-size-separator">×</span>
+            <label className="dialog-label">
+              Height (px)
+              <input
+                type="number"
+                className="dialog-input dialog-input-sm"
+                value={customHeight}
+                min={1}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCustomHeight(Number(e.target.value))}
+              />
+            </label>
+          </div>
+        )}
+
+        <div className="dialog-actions">
+          <button className="dashboard-btn secondary" onClick={onCancel}>Cancel</button>
+          <button className="dashboard-btn primary" onClick={handleSubmit} disabled={!name.trim()}>Create</button>
+        </div>
       </div>
     </div>
   );
@@ -584,12 +723,11 @@ function SettingsTab() {
   const { project, updateBackground } = useProjectStore();
   const previewRef = useRef<HTMLCanvasElement>(null);
   
-  if (!project) return null;
-  
-  const { background } = project.config;
+  const background = project?.config.background ?? null;
 
   // プレビュー描画
   useEffect(() => {
+    if (!background) return;
     const canvas = previewRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -621,6 +759,8 @@ function SettingsTab() {
       ctx.stroke();
     }
   }, [background]);
+
+  if (!project || !background) return null;
 
   const labelStyle: React.CSSProperties = { display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' };
   const rowStyle: React.CSSProperties = { marginBottom: 16 };

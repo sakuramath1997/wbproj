@@ -982,6 +982,50 @@ body {
   background: var(--danger-hover);
 }
 
+.dialog-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 14px;
+}
+
+.dialog-input,
+.dialog-select {
+  padding: 8px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  font-size: 14px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.dialog-input:focus,
+.dialog-select:focus {
+  border-color: var(--accent-primary);
+}
+
+.dialog-input-sm {
+  width: 100px;
+}
+
+.dialog-custom-size {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.dialog-size-separator {
+  font-size: 16px;
+  color: var(--text-secondary);
+  padding-bottom: 10px;
+}
+
 /* ========================================
    Empty state
 ======================================== */
